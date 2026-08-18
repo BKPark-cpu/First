@@ -3,17 +3,21 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>URL → QR 코드 생성기</title>
+<title>LimeQR – 로컬 QR 코드 생성기</title>
 <style>
   :root {
-    --bg: #f4f5f7;
+    --bg: #eef7ec;
     --card-bg: #ffffff;
-    --text: #1f2430;
-    --muted: #6b7280;
-    --border: #e2e4e9;
-    --accent: #2563eb;
-    --accent-hover: #1d4ed8;
-    --danger: #dc2626;
+    --text: #1b2a1e;
+    --muted: #5c6f5e;
+    --border: #cfe8cf;
+    --accent: #2E7D32;
+    --accent-hover: #256b29;
+    --accent-soft: #e3f3e3;
+    --cta: #FFC107;
+    --cta-hover: #ffb300;
+    --cta-text: #2b2205;
+    --danger: #c62828;
     --radius: 14px;
   }
   * { box-sizing: border-box; }
@@ -33,10 +37,11 @@
     max-width: 480px;
   }
   h1 {
-    font-size: 20px;
-    font-weight: 700;
+    font-size: 22px;
+    font-weight: 800;
     margin: 0 0 4px;
     text-align: center;
+    color: var(--accent);
   }
   .subtitle {
     text-align: center;
@@ -150,18 +155,75 @@
     transition: background .15s, opacity .15s;
   }
   button.primary {
-    background: var(--accent);
-    color: #fff;
+    background: var(--cta);
+    color: var(--cta-text);
   }
-  button.primary:hover { background: var(--accent-hover); }
+  button.primary:hover { background: var(--cta-hover); }
   button.secondary {
-    background: #eef2f7;
-    color: var(--text);
+    background: var(--accent-soft);
+    color: var(--accent);
   }
-  button.secondary:hover { background: #e2e8f1; }
+  button.secondary:hover { background: #d3ead3; }
   button:disabled {
     opacity: .45;
     cursor: not-allowed;
+  }
+  .color-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-top: 14px;
+  }
+  .color-row label { margin: 0; flex: 0 0 auto; }
+  input[type="color"] {
+    width: 36px;
+    height: 32px;
+    padding: 0;
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    background: none;
+    cursor: pointer;
+  }
+  .preset-swatch {
+    flex: 0 0 auto;
+    width: 28px;
+    height: 28px;
+    border-radius: 8px;
+    border: 2px solid transparent;
+    cursor: pointer;
+    padding: 0;
+  }
+  .preset-swatch.active { border-color: var(--text); }
+  .history-list {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+  }
+  .history-item {
+    flex: 0 0 auto;
+    padding: 6px 10px;
+    font-size: 12px;
+    font-weight: 500;
+    background: var(--accent-soft);
+    color: var(--accent);
+    border-radius: 999px;
+  }
+  .history-item:hover { background: #d3ead3; }
+  .history-head {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    margin-bottom: 10px;
+  }
+  .history-head label { margin: 0; }
+  .clear-history-btn {
+    flex: 0 0 auto;
+    padding: 4px 10px;
+    font-size: 11px;
+    font-weight: 500;
+    background: none;
+    color: var(--muted);
+    text-decoration: underline;
   }
   footer {
     text-align: center;
@@ -172,31 +234,37 @@
   }
   @media (prefers-color-scheme: dark) {
     :root {
-      --bg: #14161b;
-      --card-bg: #1c1f26;
-      --text: #e7e9ee;
-      --muted: #9aa1ae;
-      --border: #2b2f38;
-      --accent: #3b82f6;
-      --accent-hover: #60a5fa;
+      --bg: #101913;
+      --card-bg: #17221a;
+      --text: #e7f0e8;
+      --muted: #9ab29c;
+      --border: #29392c;
+      --accent: #4CAF50;
+      --accent-hover: #66bb6a;
+      --accent-soft: #223327;
+      --cta: #FFEB3B;
+      --cta-hover: #fff176;
+      --cta-text: #2b2205;
     }
     input[type="text"], input[type="url"], select {
-      background: #12141a;
+      background: #0f1712;
       color: var(--text);
     }
-    button.secondary { background: #262a33; color: var(--text); }
-    button.secondary:hover { background: #2f343f; }
+    button.secondary { background: var(--accent-soft); color: var(--accent); }
+    button.secondary:hover { background: #2b3f30; }
+    .history-item { background: var(--accent-soft); color: var(--accent); }
+    .history-item:hover { background: #2b3f30; }
     .qr-frame { background: #fff; }
   }
 </style>
 </head>
 <body>
 <div class="app">
-  <h1>URL → QR 코드 생성기</h1>
-  <p class="subtitle">주소를 입력하면 실시간으로 스캔 가능한 QR 코드가 만들어집니다.</p>
+  <h1>LimeQR</h1>
+  <p class="subtitle">텍스트나 URL을 입력하면 이 브라우저 안에서만 실시간으로 QR 코드가 만들어집니다. 서버 전송 없음, 인터넷 연결 불필요.</p>
 
   <div class="card">
-    <label for="urlInput">웹사이트 주소 (URL)</label>
+    <label for="urlInput">텍스트 / URL</label>
     <input id="urlInput" type="text" placeholder="예: example.com 또는 https://example.com" autocomplete="off" spellcheck="false">
 
     <div class="row">
@@ -212,12 +280,18 @@
       <div>
         <label for="sizeSelect">이미지 크기</label>
         <select id="sizeSelect">
-          <option value="240">240 x 240</option>
-          <option value="320" selected>320 x 320</option>
-          <option value="400">400 x 400</option>
-          <option value="512">512 x 512</option>
+          <option value="250">250 x 250</option>
+          <option value="500" selected>500 x 500</option>
+          <option value="1000">1000 x 1000</option>
         </select>
       </div>
+    </div>
+
+    <div class="color-row">
+      <label for="qrColorInput">QR 색상</label>
+      <input type="color" id="qrColorInput" value="#2E7D32">
+      <button type="button" class="preset-swatch active" id="presetGreen" style="background:#2E7D32;" title="초록 (기본)" aria-label="초록"></button>
+      <button type="button" class="preset-swatch" id="presetYellow" style="background:#FFC107;" title="노랑" aria-label="노랑"></button>
     </div>
 
     <div class="toggle-line">
@@ -230,8 +304,8 @@
 
   <div class="card qr-card">
     <div class="qr-frame" id="qrFrame">
-      <canvas id="qrCanvas" width="320" height="320" style="display:none;"></canvas>
-      <div class="placeholder" id="placeholder">URL을 입력하면<br>여기에 QR 코드가 표시됩니다</div>
+      <canvas id="qrCanvas" width="500" height="500" style="display:none;"></canvas>
+      <div class="placeholder" id="placeholder">텍스트나 URL을 입력하면<br>여기에 QR 코드가 표시됩니다</div>
     </div>
     <div class="actions">
       <button class="secondary" id="copyBtn" disabled>이미지 복사</button>
@@ -239,8 +313,17 @@
     </div>
   </div>
 
+  <div class="card" id="historyCard" style="display:none;">
+    <div class="history-head">
+      <label>최근 생성 내역</label>
+      <button type="button" class="clear-history-btn" id="clearHistoryBtn">지우기</button>
+    </div>
+    <div class="history-list" id="historyList"></div>
+  </div>
+
   <footer>
-    모든 처리는 브라우저 안에서만 이루어지며, 입력한 주소는 서버로 전송되지 않습니다.<br>
+    모든 처리는 이 브라우저 안에서만 이루어지며, 입력한 내용은 서버로 전송되지 않습니다.<br>
+    최근 생성 내역은 이 기기의 로컬 저장소(LocalStorage)에만 저장됩니다.<br>
     QR 인코딩: qrcode-generator (Kazuhiko Arase, MIT License)
   </footer>
 </div>
@@ -2578,18 +2661,72 @@ var qrcode = function() {
   var urlInput = document.getElementById('urlInput');
   var eccSelect = document.getElementById('eccSelect');
   var sizeSelect = document.getElementById('sizeSelect');
+  var qrColorInput = document.getElementById('qrColorInput');
+  var presetGreen = document.getElementById('presetGreen');
+  var presetYellow = document.getElementById('presetYellow');
   var autoSchemeCheck = document.getElementById('autoSchemeCheck');
   var metaLine = document.getElementById('metaLine');
   var canvas = document.getElementById('qrCanvas');
   var placeholder = document.getElementById('placeholder');
   var copyBtn = document.getElementById('copyBtn');
   var downloadBtn = document.getElementById('downloadBtn');
+  var historyCard = document.getElementById('historyCard');
+  var historyList = document.getElementById('historyList');
+  var clearHistoryBtn = document.getElementById('clearHistoryBtn');
   var ctx = canvas.getContext('2d');
 
   var SCHEME_RE = /^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//;
   var MARGIN_MODULES = 4;
+  var HISTORY_KEY = 'limeqr_history';
+  var HISTORY_MAX = 5;
   var debounceTimer = null;
+  var historyTimer = null;
   var lastRenderedText = '';
+
+  function setActivePreset(color) {
+    presetGreen.classList.toggle('active', color.toLowerCase() === '#2e7d32');
+    presetYellow.classList.toggle('active', color.toLowerCase() === '#ffc107');
+  }
+
+  function loadHistory() {
+    try {
+      var raw = JSON.parse(localStorage.getItem(HISTORY_KEY));
+      return Array.isArray(raw) ? raw : [];
+    } catch (e) {
+      return [];
+    }
+  }
+
+  function renderHistory() {
+    var list = loadHistory();
+    historyCard.style.display = list.length ? 'block' : 'none';
+    historyList.innerHTML = '';
+    list.forEach(function (item) {
+      var btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'history-item';
+      btn.textContent = item.length > 36 ? item.slice(0, 36) + '…' : item;
+      btn.title = item;
+      btn.addEventListener('click', function () {
+        urlInput.value = item;
+        render();
+      });
+      historyList.appendChild(btn);
+    });
+  }
+
+  function addToHistory(text) {
+    if (!text) return;
+    var list = loadHistory().filter(function (item) { return item !== text; });
+    list.unshift(text);
+    if (list.length > HISTORY_MAX) list = list.slice(0, HISTORY_MAX);
+    try {
+      localStorage.setItem(HISTORY_KEY, JSON.stringify(list));
+    } catch (e) {
+      // localStorage unavailable (e.g. private mode) — history is a nice-to-have, skip silently.
+    }
+    renderHistory();
+  }
 
   function resolveTargetUrl(raw) {
     var text = raw.trim();
@@ -2616,7 +2753,7 @@ var qrcode = function() {
   function drawQrToCanvas(qr) {
     var moduleCount = qr.getModuleCount();
     var totalModules = moduleCount + MARGIN_MODULES * 2;
-    var targetSize = parseInt(sizeSelect.value, 10) || 320;
+    var targetSize = parseInt(sizeSelect.value, 10) || 500;
     var cellSize = Math.max(1, Math.floor(targetSize / totalModules));
     var actualSize = cellSize * totalModules;
     var dpr = window.devicePixelRatio || 1;
@@ -2630,7 +2767,7 @@ var qrcode = function() {
     ctx.fillStyle = '#ffffff';
     ctx.fillRect(0, 0, actualSize, actualSize);
 
-    ctx.fillStyle = '#000000';
+    ctx.fillStyle = qrColorInput.value || '#2E7D32';
     var offset = MARGIN_MODULES * cellSize;
     for (var row = 0; row < moduleCount; row++) {
       for (var col = 0; col < moduleCount; col++) {
@@ -2652,7 +2789,8 @@ var qrcode = function() {
 
     if (!target) {
       lastRenderedText = '';
-      showPlaceholder('URL을 입력하면\n여기에 QR 코드가 표시됩니다');
+      if (historyTimer) clearTimeout(historyTimer);
+      showPlaceholder('텍스트나 URL을 입력하면\n여기에 QR 코드가 표시됩니다');
       setMeta('');
       return;
     }
@@ -2673,6 +2811,9 @@ var qrcode = function() {
         (target !== rawValue.trim() ? '인코딩 대상: ' + target + '  ·  ' : '') +
         byteLength + ' bytes · 버전 ' + typeNumber + ' · ' + moduleCount + 'x' + moduleCount + ' 모듈'
       );
+
+      if (historyTimer) clearTimeout(historyTimer);
+      historyTimer = setTimeout(function () { addToHistory(target); }, 1000);
     } catch (err) {
       lastRenderedText = '';
       showPlaceholder('QR 코드를 생성할 수 없습니다');
@@ -2689,6 +2830,25 @@ var qrcode = function() {
   eccSelect.addEventListener('change', render);
   sizeSelect.addEventListener('change', render);
   autoSchemeCheck.addEventListener('change', render);
+
+  qrColorInput.addEventListener('input', function () {
+    setActivePreset(qrColorInput.value);
+    render();
+  });
+  presetGreen.addEventListener('click', function () {
+    qrColorInput.value = '#2E7D32';
+    setActivePreset(qrColorInput.value);
+    render();
+  });
+  presetYellow.addEventListener('click', function () {
+    qrColorInput.value = '#FFC107';
+    setActivePreset(qrColorInput.value);
+    render();
+  });
+  clearHistoryBtn.addEventListener('click', function () {
+    try { localStorage.removeItem(HISTORY_KEY); } catch (e) {}
+    renderHistory();
+  });
 
   downloadBtn.addEventListener('click', function () {
     if (!lastRenderedText) return;
@@ -2718,6 +2878,7 @@ var qrcode = function() {
     }, 'image/png');
   });
 
+  renderHistory();
   render();
 })();
 </script>
