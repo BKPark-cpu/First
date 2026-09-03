@@ -3,12 +3,14 @@
  * 종목명을 검색해 첫 번째 결과의 종목명과 현재가를 가져온다.
  *
  * 사용법:
- *   node scripts/stock-price.js --url <검색 페이지 URL> --query 삼성전자 [--headed] [--json]
+ *   node scripts/stock-price.js --query 삼성전자 [--url <검색 페이지 URL>] [--headed] [--json]
  *
- * URL은 STOCK_SEARCH_URL 환경변수로도 지정할 수 있다.
+ * URL을 생략하면 다음 파이낸스를 사용한다. STOCK_SEARCH_URL 환경변수로도 지정할 수 있다.
  */
 const { chromium } = require('@playwright/test');
 const { findChromium } = require('../lib/chromium');
+
+const DEFAULT_URL = 'https://finance.daum.net/';
 
 const SELECTORS = {
   searchBox: '//*[@id="boxSearchbar"]',
@@ -28,8 +30,7 @@ function parseArgs(argv) {
     else if (arg === '--timeout') args.timeout = Number(argv[++i]);
     else throw new Error(`알 수 없는 인자: ${arg}`);
   }
-  args.url = args.url || process.env.STOCK_SEARCH_URL;
-  if (!args.url) throw new Error('--url 또는 STOCK_SEARCH_URL 이 필요합니다.');
+  args.url = args.url || process.env.STOCK_SEARCH_URL || DEFAULT_URL;
   if (!args.query) throw new Error('--query <종목명> 이 필요합니다.');
   return args;
 }
@@ -87,4 +88,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { SELECTORS, fetchStock };
+module.exports = { DEFAULT_URL, SELECTORS, fetchStock };
