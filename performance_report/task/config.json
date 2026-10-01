@@ -1,0 +1,71 @@
+{
+  "fiscalYearStartMonth": 10,
+  "reportUnit": 1000000,
+  "reportUnitLabel": "백만원",
+  "planUnit": 1000000,
+  "maintenanceType": "유지보수",
+  "maintenanceAsGroup": true,
+  "mappingBasis": "report",
+  "closedDir": "closed",
+  "files": {
+    "orders": "수주실적.csv",
+    "sales": "매출실적.csv",
+    "mapping": "제품군매핑.csv",
+    "plan": "사업계획.csv",
+    "pnl": "손익실적.csv",
+    "history": "마감이력.csv"
+  },
+  "typeValues": {
+    "구축": ["구축", "제품", "신규"],
+    "유지보수": ["유지보수", "유지관리", "MA"]
+  },
+  "orderColumns": {
+    "date":     ["수주일", "수주월", "계약일"],
+    "pjtCode":  ["PJT코드", "프로젝트코드"],
+    "pjtName":  ["PJT명칭", "프로젝트명"],
+    "customer": ["거래처", "원청고객사", "고객사"],
+    "group":    ["제품군"],
+    "type":     ["구분", "사업구분"],
+    "dept":     ["부서", "영업부서"],
+    "owner":    ["담당", "영업담당"],
+    "gross":    ["수주금액", "총수주액"],
+    "cost1":    ["용역비"],
+    "cost2":    ["판매수수료"],
+    "ref":      ["계약번호", "비고"]
+  },
+  "salesColumns": {
+    "date":     ["매출일", "매출월", "발행일"],
+    "pjtCode":  ["PJT코드", "프로젝트코드"],
+    "pjtName":  ["PJT명칭", "프로젝트명"],
+    "customer": ["거래처", "원청고객사", "고객사"],
+    "group":    ["제품군"],
+    "type":     ["구분", "사업구분"],
+    "dept":     ["부서", "영업부서"],
+    "owner":    ["담당", "영업담당"],
+    "gross":    ["매출금액", "공급가액"],
+    "cost1":    ["외주비", "용역비"],
+    "cost2":    ["판매수수료"],
+    "ref":      ["세금계산서번호", "비고"]
+  },
+  "pnlColumns": {
+    "month":     ["월", "귀속월"],
+    "project":   ["과제기여", "과제기여금"],
+    "labor":     ["인건비"],
+    "expense":   ["경비"],
+    "headcount": ["월말인원", "인원"]
+  },
+  "mappingColumns": {
+    "raw":    ["원천제품군"],
+    "report": ["보고제품군"],
+    "from":   ["적용시작월"],
+    "to":     ["적용종료월"],
+    "order":  ["정렬순서", "순서"]
+  },
+  "planColumns": {
+    "fy":     ["사업연도"],
+    "scope":  ["구분"],
+    "target": ["대상"],
+    "metric": ["지표"],
+    "amount": ["연간목표", "연간목표(백만원)"]
+  }
+}

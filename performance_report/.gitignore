@@ -1,0 +1,5 @@
+# 운영 데이터는 저장소에 올리지 않는다 (샘플만 커밋)
+task/input/*.csv
+task/input/*.bak
+task/input/closed/
+task/output/
