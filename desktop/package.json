@@ -52,7 +52,8 @@
       }
     ],
     "win": {
-      "target": "nsis"
+      "target": "nsis",
+      "executableName": "PDF-Edit-Agent"
     },
     "nsis": {
       "oneClick": false,
