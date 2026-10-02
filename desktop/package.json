@@ -1,0 +1,71 @@
+{
+  "name": "pdf-edit-agent",
+  "productName": "PDF 편집 에이전트",
+  "version": "1.0.0",
+  "description": "텍스트·이미지·하이라이트·도형·펜으로 PDF를 편집하는 데스크톱 앱",
+  "author": "BKPark",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/BKPark-cpu/First.git",
+    "directory": "desktop"
+  },
+  "main": "main.js",
+  "private": true,
+  "scripts": {
+    "build:renderer": "node scripts/build-renderer.js",
+    "start": "npm run build:renderer && electron .",
+    "dist": "npm run build:renderer && electron-builder",
+    "dist:win": "npm run build:renderer && electron-builder --win",
+    "dist:mac": "npm run build:renderer && electron-builder --mac",
+    "dist:linux": "npm run build:renderer && electron-builder --linux"
+  },
+  "devDependencies": {
+    "@kfonts/nanum-gothic": "0.2.0",
+    "@pdf-lib/fontkit": "1.1.1",
+    "electron": "44.5.1",
+    "electron-builder": "26.15.3",
+    "pdf-lib": "1.17.1",
+    "pdfjs-dist": "3.11.174",
+    "pretendard": "1.3.9"
+  },
+  "build": {
+    "appId": "com.bkpark.pdfeditagent",
+    "productName": "PDF 편집 에이전트",
+    "artifactName": "pdf-edit-agent-${version}-${os}-${arch}.${ext}",
+    "directories": {
+      "output": "dist",
+      "buildResources": "build"
+    },
+    "files": [
+      "main.js",
+      "preload.js",
+      "app/**/*",
+      "THIRD_PARTY_NOTICES.md",
+      "package.json"
+    ],
+    "fileAssociations": [
+      {
+        "ext": "pdf",
+        "name": "PDF 문서",
+        "role": "Editor",
+        "mimeType": "application/pdf"
+      }
+    ],
+    "win": {
+      "target": "nsis"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true
+    },
+    "mac": {
+      "target": "dmg",
+      "category": "public.app-category.productivity"
+    },
+    "linux": {
+      "target": "AppImage",
+      "category": "Office"
+    },
+    "publish": null
+  }
+}

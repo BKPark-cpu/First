@@ -514,11 +514,16 @@
     empty: $('empty'), pages: $('pages'), toast: $('toast'), toastText: $('toastText'),
   };
   const toolButtons = Array.from(document.querySelectorAll('.tool[data-tool]'));
+  // 데스크톱 앱(Electron)에서 실행되면 preload가 window.pdfAgent를 제공한다. 브라우저에서는 null.
+  const desktop = window.pdfAgent || null;
+  const BASE_TITLE = document.title;
 
   // 편집 객체는 순수 데이터로만 보관하고(실행취소 스냅숏 대상), 화면 요소는 views에 따로 둔다.
   const state = {
     pdfBytes: null,
     pdfName: '',
+    pdfPath: null,  // 데스크톱: 원본 파일 경로
+    savePath: null, // 데스크톱: 마지막으로 저장한 경로(Ctrl+S 시 다시 묻지 않음)
     pages: [],      // { index, pdfPage, viewport, width, height, scale, outer, inner, layer, canvas }
     objects: [],    // 배열 순서가 곧 그리는 순서(z-order)
     selectedPage: -1,
@@ -605,13 +610,14 @@
   // ---- 실행취소 / 다시실행 ----
   // 변경이 확정될 때마다 commit()으로 객체 목록 전체를 스냅숏으로 쌓는다.
   // 이미지 바이트와 펜 좌표 배열은 생성 후 바꾸지 않으므로 참조를 공유해도 안전하다.
-  const history = { stack: [], index: -1, limit: 100 };
+  const history = { stack: [], index: -1, limit: 100, savedRef: null };
   function cloneObjects(list) {
     return list.map((o) => (o.lines ? { ...o, lines: o.lines.slice() } : { ...o }));
   }
   function resetHistory() {
     history.stack = [cloneObjects(state.objects)];
     history.index = 0;
+    history.savedRef = history.stack[0];
     updateUndoButtons();
   }
   function commit() {
@@ -643,11 +649,21 @@
   function updateUndoButtons() {
     els.undoBtn.disabled = history.index <= 0;
     els.redoBtn.disabled = history.index < 0 || history.index >= history.stack.length - 1;
+    if (desktop) desktop.setDirty(isDirty());
+  }
+  // 마지막으로 열거나 저장한 상태와 지금 상태가 다른지
+  function isDirty() {
+    return history.index >= 0 && history.stack[history.index] !== history.savedRef;
+  }
+  function markSaved() {
+    history.savedRef = history.stack[history.index];
+    updateUndoButtons();
   }
 
   // ---- PDF 열기 및 렌더링 (참고: App.svelte addPDF, PDFPage.svelte) ----
-  async function openPDF(file) {
+  async function openPDF(file, filePath = null, { confirmed = false } = {}) {
     if (!file) return;
+    if (!confirmed && isDirty() && !window.confirm('저장하지 않은 변경 사항이 있어요. 새 PDF를 열까요?')) return;
     if (file.type !== 'application/pdf' && !/\.pdf$/i.test(file.name)) {
       toast('PDF 파일만 열 수 있어요.', { error: true });
       return;
@@ -656,7 +672,7 @@
     try {
       const bytes = await readAsArrayBuffer(file);
       // pdf.js 워커로 넘기면 버퍼가 분리되므로 복사본을 넘긴다.
-      const pdf = await pdfjsLib.getDocument({ data: bytes.slice(0) }).promise;
+      const pdf = await pdfjsLib.getDocument({ data: bytes.slice(0), isEvalSupported: false }).promise;
       views.clear();
       state.objects = [];
       state.activeId = null;
@@ -664,6 +680,9 @@
       state.pages = [];
       state.pdfBytes = bytes;
       state.pdfName = file.name;
+      state.pdfPath = filePath;
+      state.savePath = null;
+      document.title = `${file.name} - ${BASE_TITLE}`;
       els.pages.textContent = '';
       els.empty.hidden = true;
       els.fileName.textContent = `${file.name} · ${pdf.numPages}쪽`;
@@ -1375,7 +1394,7 @@
     }
   }
 
-  async function savePDF() {
+  async function savePDF(forceDialog = false) {
     if (!state.pdfBytes || state.saving) return;
     finishTextEditing();
     state.saving = true;
@@ -1467,18 +1486,33 @@
       }
 
       const out = await doc.save();
+      const fallbackNote = nanumFallback ? ' 일부 글자는 나눔고딕으로 바꿔 저장했어요.' : '';
+      const suggestedName = state.pdfName.replace(/\.pdf$/i, '') + '-edited.pdf';
+      if (desktop) {
+        // 데스크톱: 네이티브 저장 대화상자로 파일에 직접 쓴다.
+        const res = await desktop.savePdf({
+          data: out, suggestedName, sourcePath: state.pdfPath, targetPath: state.savePath, forceDialog,
+        });
+        if (res.canceled) {
+          toast('저장을 취소했어요');
+          return;
+        }
+        state.savePath = res.path;
+        markSaved();
+        toast(`${res.name}에 저장했어요.${fallbackNote}`);
+        return;
+      }
       const blob = new Blob([out], { type: 'application/pdf' });
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
-      a.download = state.pdfName.replace(/\.pdf$/i, '') + '-edited.pdf';
+      a.download = suggestedName;
       document.body.appendChild(a);
       a.click();
       a.remove();
       setTimeout(() => URL.revokeObjectURL(url), 10000);
-      toast(nanumFallback
-        ? '저장했어요. 일부 글자는 나눔고딕으로 바꿔 저장했어요.'
-        : 'PDF를 저장했어요');
+      markSaved();
+      toast(`PDF를 저장했어요.${fallbackNote}`);
     } catch (e) {
       console.error(e);
       toast('저장하지 못했어요: ' + (e && e.message ? e.message : e), { error: true });
@@ -1489,11 +1523,26 @@
   }
 
   // ---- 이벤트 연결 ----
-  const openPicker = () => els.pdfInput.click();
+  const fromDesktopFile = (f) => new File([f.data], f.name, { type: 'application/pdf' });
+  const pathOf = (file) => (desktop ? desktop.getPathForFile(file) : null);
+  async function openPicker() {
+    if (!desktop) {
+      els.pdfInput.click();
+      return;
+    }
+    try {
+      const f = await desktop.openDialog(); // 저장 안 된 변경 확인은 메인 프로세스가 한다.
+      if (f) openPDF(fromDesktopFile(f), f.path, { confirmed: true });
+    } catch (e) {
+      console.error(e);
+      toast('파일을 열 수 없어요.', { error: true });
+    }
+  }
   els.openBtn.addEventListener('click', openPicker);
   els.emptyOpenBtn.addEventListener('click', openPicker);
   els.pdfInput.addEventListener('change', (e) => {
-    openPDF(e.target.files[0]);
+    const file = e.target.files[0];
+    openPDF(file, file ? pathOf(file) : null);
     e.target.value = '';
   });
   els.imageInput.addEventListener('change', (e) => {
@@ -1504,7 +1553,7 @@
   toolButtons.forEach((b) => b.addEventListener('click', () => setTool(b.dataset.tool)));
   els.undoBtn.addEventListener('click', undo);
   els.redoBtn.addEventListener('click', redo);
-  els.saveBtn.addEventListener('click', savePDF);
+  els.saveBtn.addEventListener('click', () => savePDF());
 
   const SHORTCUTS = { v: 'select', t: 'text', h: 'highlight', r: 'rect', o: 'ellipse', p: 'pen' };
   window.addEventListener('keydown', (e) => {
@@ -1512,6 +1561,8 @@
     const a = document.activeElement;
     const typing = a && (['INPUT', 'SELECT', 'TEXTAREA'].includes(a.tagName) || a.isContentEditable);
     const mod = e.ctrlKey || e.metaKey;
+    // 데스크톱 앱에서는 이 단축키를 메뉴가 받아 onCommand로 전달한다(중복 실행 방지).
+    if (desktop && mod && ['z', 'y', 's', 'o'].includes(e.key.toLowerCase())) return;
     if (typing) return; // 텍스트 편집 중에는 브라우저 기본 동작(글자 단위 실행취소 등)을 따른다.
     if (mod && e.key.toLowerCase() === 'z') {
       e.preventDefault();
@@ -1523,6 +1574,9 @@
     } else if (mod && e.key.toLowerCase() === 's') {
       e.preventDefault();
       savePDF();
+    } else if (mod && e.key.toLowerCase() === 'o') {
+      e.preventDefault();
+      openPicker();
     } else if (!mod && !e.altKey && SHORTCUTS[e.key.toLowerCase()]) {
       setTool(SHORTCUTS[e.key.toLowerCase()]);
     } else if (!mod && e.key.toLowerCase() === 'i') {
@@ -1547,10 +1601,28 @@
     const file = e.dataTransfer.files[0];
     if (!file) return;
     if (file.type.startsWith('image/') && state.pages.length) addImage(file);
-    else openPDF(file);
+    else openPDF(file, pathOf(file));
   });
 
+  // ---- 데스크톱 앱 연동 (Electron 메뉴 · 파일 연결) ----
+  if (desktop) {
+    const typingNow = () => {
+      const a = document.activeElement;
+      return !!(a && a.isContentEditable);
+    };
+    desktop.onOpenFile((f) => openPDF(fromDesktopFile(f), f.path, { confirmed: true }));
+    desktop.onCommand((command) => {
+      if (command === 'open') openPicker();
+      else if (!state.pages.length) return;
+      else if (command === 'save') savePDF(false);
+      else if (command === 'saveAs') savePDF(true);
+      else if (command === 'undo') typingNow() ? document.execCommand('undo') : undo();
+      else if (command === 'redo') typingNow() ? document.execCommand('redo') : redo();
+    });
+  }
+
   updateButtons();
+  if (desktop) desktop.ready();
 })();
 </script>
 </body>
