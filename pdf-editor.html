@@ -1,0 +1,958 @@
+<!DOCTYPE html>
+<!--
+  PDF 편집기 (텍스트 · 이미지 추가)
+
+  이 웹앱의 PDF 편집 로직은 다음 오픈소스 레포를 참고해 바닐라 JavaScript로 다시 작성했습니다.
+    - 참고 레포: ShizukuIchi/pdf-editor (https://github.com/ShizukuIchi/pdf-editor)
+    - 라이선스 : MIT License, Copyright (c) 2020 ShizukuIchi
+
+  참고한 부분
+    - pdf.js로 각 페이지를 scale 1 뷰포트로 canvas에 렌더링하고, 화면 크기에 맞춘 배율(pageScale)로
+      드래그 이동량을 PDF 좌표로 환산하는 방식 (PDFPage.svelte, Text.svelte, Image.svelte)
+    - 이미지 객체의 8방향 리사이즈 핸들과 Shift 키 비율 유지 계산 (Image.svelte)
+    - JPEG/PNG가 아닌 이미지를 canvas로 PNG 변환해 임베드하는 처리 (Image.svelte)
+    - pdf-lib로 원본 PDF를 불러와 페이지별 객체를 그리고, PDF의 y축이 아래에서 시작하는 점을
+      보정해 저장하는 흐름 (utils/PDF.js)
+    - FileReader를 Promise로 감싼 파일 읽기 유틸 (utils/asyncReader.js)
+
+  사용 라이브러리
+    - pdf.js (Apache-2.0), pdf-lib (MIT), @pdf-lib/fontkit (MIT), 나눔고딕 폰트 (OFL-1.1)
+-->
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>PDF 편집기</title>
+<style>
+  :root {
+    --bg: #f4f5f7;
+    --card-bg: #ffffff;
+    --text: #1f2430;
+    --muted: #6b7280;
+    --border: #e2e4e9;
+    --accent: #2563eb;
+    --accent-hover: #1d4ed8;
+    --danger: #dc2626;
+    --radius: 12px;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    min-height: 100vh;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Apple SD Gothic Neo",
+      "Noto Sans KR", Roboto, Helvetica, Arial, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+  }
+  header {
+    position: sticky;
+    top: 0;
+    z-index: 20;
+    background: var(--card-bg);
+    border-bottom: 1px solid var(--border);
+  }
+  .bar {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+    max-width: 1000px;
+    margin: 0 auto;
+    padding: 10px 16px;
+  }
+  h1 {
+    font-size: 17px;
+    font-weight: 700;
+    margin: 0 8px 0 0;
+  }
+  .file-name {
+    flex: 1;
+    min-width: 0;
+    font-size: 13px;
+    color: var(--muted);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  button, .btn {
+    font: inherit;
+    font-size: 14px;
+    font-weight: 600;
+    border: 1px solid var(--border);
+    background: var(--card-bg);
+    color: var(--text);
+    border-radius: 8px;
+    padding: 8px 12px;
+    cursor: pointer;
+    white-space: nowrap;
+  }
+  button:hover:not(:disabled), .btn:hover { border-color: var(--accent); color: var(--accent); }
+  button:disabled { opacity: 0.45; cursor: not-allowed; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  button.primary:hover:not(:disabled) { background: var(--accent-hover); color: #fff; }
+  button.danger { color: var(--danger); }
+  button.danger:hover:not(:disabled) { border-color: var(--danger); color: var(--danger); }
+  input[type="file"] { display: none; }
+
+  .tools {
+    border-top: 1px solid var(--border);
+    background: #fafafb;
+    font-size: 13px;
+  }
+  .tools[hidden] { display: none; }
+  .tools label { display: flex; align-items: center; gap: 6px; color: var(--muted); }
+  .tools select, .tools input[type="number"] {
+    font: inherit;
+    font-size: 13px;
+    padding: 5px 6px;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    background: #fff;
+    color: var(--text);
+  }
+  .tools input[type="number"] { width: 64px; }
+  .tools input[type="color"] {
+    width: 32px; height: 28px; padding: 0; border: 1px solid var(--border); border-radius: 6px; background: #fff;
+  }
+  .tools .hint { color: var(--muted); }
+
+  .status {
+    font-size: 13px;
+    color: var(--muted);
+    text-align: center;
+    min-height: 18px;
+    margin: 10px 16px 0;
+  }
+  .status.error { color: var(--danger); }
+
+  main {
+    max-width: 1000px;
+    margin: 0 auto;
+    padding: 12px 16px 64px;
+  }
+  .dropzone {
+    margin-top: 24px;
+    border: 2px dashed var(--border);
+    border-radius: var(--radius);
+    background: var(--card-bg);
+    padding: 64px 16px;
+    text-align: center;
+    color: var(--muted);
+    cursor: pointer;
+  }
+  .dropzone.over, .dropzone:hover { border-color: var(--accent); color: var(--accent); }
+  .dropzone strong { display: block; font-size: 16px; color: var(--text); margin-bottom: 6px; }
+
+  .pages { display: flex; flex-direction: column; align-items: center; gap: 20px; }
+  .page-outer {
+    position: relative;
+    background: #fff;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.12);
+    outline: 2px solid transparent;
+    outline-offset: 3px;
+  }
+  .page-outer.selected { outline-color: var(--accent); }
+  .page-label {
+    position: absolute;
+    top: -2px;
+    left: 100%;
+    margin-left: 8px;
+    font-size: 12px;
+    color: var(--muted);
+    white-space: nowrap;
+  }
+  .page-inner {
+    position: absolute;
+    left: 0;
+    top: 0;
+    transform-origin: 0 0;
+  }
+  .page-inner canvas { display: block; width: 100%; height: 100%; }
+  .layer { position: absolute; inset: 0; overflow: hidden; }
+
+  .obj {
+    position: absolute;
+    left: 0;
+    top: 0;
+    touch-action: none;
+    user-select: none;
+    -webkit-user-select: none;
+    cursor: grab;
+    outline: 1px dashed rgba(107, 114, 128, 0.7);
+  }
+  .obj.dragging { cursor: grabbing; }
+  .obj.active { outline: 1px solid var(--accent); }
+  .obj.editing { cursor: text; outline: 1px dashed var(--accent); }
+  .obj .editable {
+    white-space: pre;
+    outline: none;
+    min-width: 4px;
+    padding: 0;
+    margin: 0;
+  }
+  .obj.editing .editable { user-select: text; -webkit-user-select: text; }
+  .obj.image canvas { display: block; width: 100%; height: 100%; pointer-events: none; }
+  .handle {
+    position: absolute;
+    width: 12px;
+    height: 12px;
+    margin: -6px 0 0 -6px;
+    background: #fff;
+    border: 2px solid var(--accent);
+    border-radius: 50%;
+    display: none;
+  }
+  .obj.active .handle { display: block; }
+  .handle[data-dir="left-top"] { left: 0; top: 0; cursor: nwse-resize; }
+  .handle[data-dir="top"] { left: 50%; top: 0; cursor: ns-resize; }
+  .handle[data-dir="right-top"] { left: 100%; top: 0; cursor: nesw-resize; }
+  .handle[data-dir="right"] { left: 100%; top: 50%; cursor: ew-resize; }
+  .handle[data-dir="right-bottom"] { left: 100%; top: 100%; cursor: nwse-resize; }
+  .handle[data-dir="bottom"] { left: 50%; top: 100%; cursor: ns-resize; }
+  .handle[data-dir="left-bottom"] { left: 0; top: 100%; cursor: nesw-resize; }
+  .handle[data-dir="left"] { left: 0; top: 50%; cursor: ew-resize; }
+  @media (max-width: 640px) {
+    .page-label { display: none; }
+    .handle { width: 18px; height: 18px; margin: -9px 0 0 -9px; }
+  }
+</style>
+</head>
+<body>
+<header>
+  <div class="bar">
+    <h1>PDF 편집기</h1>
+    <span class="file-name" id="fileName">PDF 파일을 열어주세요</span>
+    <label class="btn" for="pdfInput">PDF 열기</label>
+    <input type="file" id="pdfInput" accept="application/pdf,.pdf">
+    <button id="addTextBtn" disabled>텍스트 추가</button>
+    <button id="addImageBtn" disabled>이미지 추가</button>
+    <input type="file" id="imageInput" accept="image/*">
+    <button id="saveBtn" class="primary" disabled>PDF 저장</button>
+  </div>
+  <div class="tools" id="textTools" hidden>
+    <div class="bar">
+      <label>글꼴
+        <select id="fontSelect">
+          <option value="NanumGothic">나눔고딕 (한글)</option>
+          <option value="Helvetica">Helvetica</option>
+          <option value="Times-Roman">Times-Roman</option>
+          <option value="Courier">Courier</option>
+        </select>
+      </label>
+      <label>크기 <input type="number" id="sizeInput" min="4" max="200" step="1"></label>
+      <label>줄 간격 <input type="number" id="lineHeightInput" min="1" max="5" step="0.1"></label>
+      <label>색상 <input type="color" id="colorInput"></label>
+      <button class="danger" id="deleteTextBtn">삭제</button>
+      <span class="hint">클릭하면 편집, 드래그하면 이동</span>
+    </div>
+  </div>
+  <div class="tools" id="imageTools" hidden>
+    <div class="bar">
+      <button class="danger" id="deleteImageBtn">삭제</button>
+      <span class="hint">모서리를 드래그하면 크기 조절, Shift를 누르면 비율 유지</span>
+    </div>
+  </div>
+</header>
+
+<div class="status" id="status" role="status"></div>
+
+<main>
+  <div class="dropzone" id="dropzone">
+    <strong>PDF 파일을 여기로 끌어다 놓거나 클릭하세요</strong>
+    파일은 서버로 전송되지 않고 브라우저 안에서만 처리됩니다.
+  </div>
+  <div class="pages" id="pages"></div>
+</main>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf-lib/1.17.1/pdf-lib.min.js"></script>
+<script src="https://unpkg.com/@pdf-lib/fontkit@1.1.1/dist/fontkit.umd.min.js"></script>
+<script>
+(() => {
+  'use strict';
+
+  const PDFJS_WORKER = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+  const NANUM_URL = 'https://cdn.jsdelivr.net/npm/@kfonts/nanum-gothic@0.2.0/NanumGothic.woff';
+
+  // 글꼴 정의. 표준 14 폰트는 PDF 뷰어에 내장되어 있어 임베드가 필요 없지만 한글을 표현할 수 없다.
+  const FONTS = {
+    NanumGothic: { css: '"NanumGothicEmbed", sans-serif', standard: null },
+    Helvetica: { css: 'Helvetica, Arial, sans-serif', standard: 'Helvetica' },
+    'Times-Roman': { css: '"Times New Roman", Times, serif', standard: 'TimesRoman' },
+    Courier: { css: '"Courier New", Courier, monospace', standard: 'Courier' },
+  };
+
+  const $ = (id) => document.getElementById(id);
+  const els = {
+    fileName: $('fileName'), pdfInput: $('pdfInput'), imageInput: $('imageInput'),
+    addTextBtn: $('addTextBtn'), addImageBtn: $('addImageBtn'), saveBtn: $('saveBtn'),
+    textTools: $('textTools'), imageTools: $('imageTools'),
+    fontSelect: $('fontSelect'), sizeInput: $('sizeInput'), lineHeightInput: $('lineHeightInput'),
+    colorInput: $('colorInput'), deleteTextBtn: $('deleteTextBtn'), deleteImageBtn: $('deleteImageBtn'),
+    status: $('status'), dropzone: $('dropzone'), pages: $('pages'),
+  };
+
+  const state = {
+    pdfBytes: null,
+    pdfName: '',
+    pages: [],      // { pdfPage, viewport, width, height, scale, outer, inner, layer }
+    objects: [],    // 배열 순서가 곧 그리는 순서(z-order)
+    selectedPage: -1,
+    activeId: null,
+    saving: false,
+    lastFont: 'NanumGothic',
+  };
+  let nextId = 1;
+
+  function setStatus(msg, isError = false) {
+    els.status.textContent = msg;
+    els.status.classList.toggle('error', isError);
+  }
+
+  if (!window.pdfjsLib || !window.PDFLib || !window.fontkit) {
+    setStatus('라이브러리를 불러오지 못했습니다. 인터넷 연결을 확인하고 새로고침해 주세요.', true);
+    return;
+  }
+  pdfjsLib.GlobalWorkerOptions.workerSrc = PDFJS_WORKER;
+
+  // ---- 파일 읽기 유틸 (참고: utils/asyncReader.js) ----
+  function readAsArrayBuffer(file) {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(reader.result);
+      reader.onerror = reject;
+      reader.readAsArrayBuffer(file);
+    });
+  }
+  function readAsDataURL(file) {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(reader.result);
+      reader.onerror = reject;
+      reader.readAsDataURL(file);
+    });
+  }
+  function readAsImage(src) {
+    return new Promise((resolve, reject) => {
+      const img = new Image();
+      img.onload = () => resolve(img);
+      img.onerror = reject;
+      img.src = src;
+    });
+  }
+
+  // ---- 한글 폰트 로딩 (참고: utils/prepareAssets.js 의 fetchFont) ----
+  let nanumPromise = null;
+  function loadNanum() {
+    if (!nanumPromise) {
+      nanumPromise = fetch(NANUM_URL)
+        .then((r) => {
+          if (!r.ok) throw new Error('HTTP ' + r.status);
+          return r.arrayBuffer();
+        })
+        .then(async (buffer) => {
+          const face = new FontFace('NanumGothicEmbed', buffer.slice(0));
+          await face.load();
+          document.fonts.add(face);
+          // 폰트가 바뀌면 글자 폭이 달라지므로 보이는 텍스트 상자를 다시 그린다.
+          state.objects.forEach((o) => o.type === 'text' && applyTextStyle(o));
+          return buffer;
+        })
+        .catch((e) => {
+          nanumPromise = null;
+          throw e;
+        });
+    }
+    return nanumPromise;
+  }
+
+  // ---- PDF 열기 및 렌더링 (참고: App.svelte addPDF, PDFPage.svelte) ----
+  async function openPDF(file) {
+    if (!file) return;
+    if (file.type !== 'application/pdf' && !/\.pdf$/i.test(file.name)) {
+      setStatus('PDF 파일만 열 수 있습니다.', true);
+      return;
+    }
+    setStatus('PDF를 불러오는 중...');
+    try {
+      const bytes = await readAsArrayBuffer(file);
+      // pdf.js 워커로 넘기면 버퍼가 분리되므로 복사본을 넘긴다.
+      const pdf = await pdfjsLib.getDocument({ data: bytes.slice(0) }).promise;
+      state.objects = [];
+      state.activeId = null;
+      state.pages = [];
+      state.pdfBytes = bytes;
+      state.pdfName = file.name;
+      els.pages.textContent = '';
+      els.dropzone.hidden = true;
+      els.fileName.textContent = `${file.name} · ${pdf.numPages}쪽`;
+
+      for (let i = 0; i < pdf.numPages; i++) {
+        const pdfPage = await pdf.getPage(i + 1);
+        state.pages.push(createPage(pdfPage, i));
+      }
+      fitPages();
+      for (const page of state.pages) await renderPage(page);
+      selectPage(0);
+      updateButtons();
+      updateTools();
+      setStatus('페이지를 선택한 뒤 텍스트나 이미지를 추가하세요.');
+      loadNanum().catch(() => {});
+    } catch (e) {
+      console.error(e);
+      setStatus('PDF를 열 수 없습니다. 손상되었거나 암호가 걸린 파일일 수 있습니다.', true);
+    }
+  }
+
+  function createPage(pdfPage, index) {
+    const viewport = pdfPage.getViewport({ scale: 1 });
+    const outer = document.createElement('div');
+    outer.className = 'page-outer';
+    const label = document.createElement('span');
+    label.className = 'page-label';
+    label.textContent = `${index + 1}`;
+    const inner = document.createElement('div');
+    inner.className = 'page-inner';
+    inner.style.width = viewport.width + 'px';
+    inner.style.height = viewport.height + 'px';
+    const canvas = document.createElement('canvas');
+    const layer = document.createElement('div');
+    layer.className = 'layer';
+    inner.append(canvas, layer);
+    outer.append(inner, label);
+    els.pages.appendChild(outer);
+
+    const page = { index, pdfPage, viewport, width: viewport.width, height: viewport.height, scale: 1, outer, inner, layer, canvas };
+    outer.addEventListener('pointerdown', (e) => {
+      selectPage(index);
+      if (e.target === layer || e.target === canvas) setActive(null);
+    });
+    return page;
+  }
+
+  async function renderPage(page) {
+    const ratio = Math.min(2, Math.max(1, window.devicePixelRatio || 1));
+    const vp = page.pdfPage.getViewport({ scale: ratio });
+    page.canvas.width = Math.floor(vp.width);
+    page.canvas.height = Math.floor(vp.height);
+    await page.pdfPage.render({ canvasContext: page.canvas.getContext('2d'), viewport: vp }).promise;
+  }
+
+  // 화면 폭에 맞춰 페이지를 축소한다. 객체 좌표는 항상 PDF 단위(pt)로 유지되고,
+  // 드래그 이동량만 page.scale로 나눠 환산한다. (참고: PDFPage.svelte measure / pageScale)
+  function fitPages() {
+    const available = els.pages.clientWidth || window.innerWidth - 32;
+    state.pages.forEach((page) => {
+      page.scale = Math.min(1.5, available / page.width);
+      page.outer.style.width = page.width * page.scale + 'px';
+      page.outer.style.height = page.height * page.scale + 'px';
+      page.inner.style.transform = `scale(${page.scale})`;
+    });
+  }
+  window.addEventListener('resize', fitPages);
+
+  function selectPage(index) {
+    state.selectedPage = index;
+    state.pages.forEach((p, i) => p.outer.classList.toggle('selected', i === index));
+  }
+
+  // 새 객체를 선택된 페이지 중 화면에 보이는 영역의 위쪽에 놓는다.
+  function initialPosition(page, w, h) {
+    const rect = page.outer.getBoundingClientRect();
+    const headerBottom = document.querySelector('header').getBoundingClientRect().bottom;
+    const visibleTop = Math.max(0, (headerBottom + 24 - rect.top) / page.scale);
+    const x = Math.max(0, (page.width - w) / 2);
+    const y = Math.max(0, Math.min(page.height - h, visibleTop + 24));
+    return { x, y };
+  }
+
+  // ---- 텍스트 객체 (참고: App.svelte addTextField, Text.svelte) ----
+  function addText() {
+    const page = state.pages[state.selectedPage];
+    if (!page) return;
+    const obj = {
+      id: nextId++,
+      type: 'text',
+      page: page.index,
+      lines: ['텍스트를 입력하세요'],
+      size: 16,
+      lineHeight: 1.4,
+      fontFamily: state.lastFont,
+      color: '#000000',
+      x: 0,
+      y: 0,
+    };
+    if (obj.fontFamily === 'NanumGothic') {
+      loadNanum().catch(() => setStatus('한글 폰트를 불러오지 못했습니다. 저장 시 다시 시도합니다.', true));
+    }
+    const pos = initialPosition(page, 160, obj.size * obj.lineHeight);
+    obj.x = pos.x;
+    obj.y = pos.y;
+    state.objects.push(obj);
+    mountText(obj, page);
+    setActive(obj.id);
+    startEditing(obj, true);
+  }
+
+  function mountText(obj, page) {
+    const el = document.createElement('div');
+    el.className = 'obj text';
+    const editable = document.createElement('div');
+    editable.className = 'editable';
+    editable.spellcheck = false;
+    el.appendChild(editable);
+    page.layer.appendChild(el);
+    obj.el = el;
+    obj.editable = editable;
+    editable.textContent = obj.lines.join('\n');
+    applyTextStyle(obj);
+    placeObject(obj);
+
+    makeDraggable(obj, {
+      onTap: () => startEditing(obj),
+      ignore: (e) => obj.editing && editable.contains(e.target),
+    });
+    editable.addEventListener('blur', () => stopEditing(obj));
+    editable.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape') editable.blur();
+    });
+    // 붙여넣기는 서식 없이 텍스트만 (참고: Text.svelte onPaste)
+    editable.addEventListener('paste', (e) => {
+      e.preventDefault();
+      const text = (e.clipboardData || window.clipboardData).getData('text');
+      document.execCommand('insertText', false, text);
+    });
+  }
+
+  function applyTextStyle(obj) {
+    const s = obj.editable.style;
+    s.fontFamily = FONTS[obj.fontFamily].css;
+    s.fontSize = obj.size + 'px';
+    s.lineHeight = String(obj.lineHeight);
+    s.color = obj.color;
+  }
+
+  function startEditing(obj, selectAll = false) {
+    if (obj.editing) return;
+    obj.editing = true;
+    obj.el.classList.add('editing');
+    const ed = obj.editable;
+    try {
+      ed.contentEditable = 'plaintext-only';
+    } catch (e) {
+      ed.contentEditable = 'true';
+    }
+    if (ed.contentEditable !== 'plaintext-only') ed.contentEditable = 'true';
+    ed.focus();
+    const range = document.createRange();
+    range.selectNodeContents(ed);
+    if (!selectAll) range.collapse(false);
+    const sel = window.getSelection();
+    sel.removeAllRanges();
+    sel.addRange(range);
+  }
+
+  function stopEditing(obj) {
+    if (!obj.editing) return;
+    obj.editing = false;
+    obj.el.classList.remove('editing');
+    obj.editable.contentEditable = 'false';
+    const lines = obj.editable.innerText.replace(/\r/g, '').replace(/ /g, ' ').split('\n');
+    while (lines.length > 1 && lines[lines.length - 1] === '') lines.pop();
+    if (lines.every((l) => l.trim() === '')) {
+      deleteObject(obj.id);
+      return;
+    }
+    obj.lines = lines;
+    obj.editable.textContent = lines.join('\n');
+  }
+
+  // ---- 이미지 객체 (참고: App.svelte addImage, Image.svelte) ----
+  async function addImage(file) {
+    const page = state.pages[state.selectedPage];
+    if (!file || !page) return;
+    try {
+      // dataURL로 읽어야 canvas가 오염(tainted)되지 않는다.
+      const img = await readAsImage(await readAsDataURL(file));
+      let bytes;
+      let mime = file.type;
+      if (mime === 'image/jpeg' || mime === 'image/png') {
+        bytes = await readAsArrayBuffer(file);
+      } else {
+        // pdf-lib은 JPEG/PNG만 임베드할 수 있으므로 그 외 형식은 PNG로 변환한다.
+        const c = document.createElement('canvas');
+        c.width = img.naturalWidth;
+        c.height = img.naturalHeight;
+        c.getContext('2d').drawImage(img, 0, 0);
+        const blob = await new Promise((r) => c.toBlob(r, 'image/png'));
+        bytes = await readAsArrayBuffer(blob);
+        mime = 'image/png';
+      }
+      let width = img.naturalWidth;
+      let height = img.naturalHeight;
+      const limit = Math.min(500, page.width * 0.6, page.height * 0.6);
+      const scale = Math.min(1, limit / width, limit / height);
+      width *= scale;
+      height *= scale;
+      const pos = initialPosition(page, width, height);
+      const obj = { id: nextId++, type: 'image', page: page.index, x: pos.x, y: pos.y, width, height, img, bytes, mime };
+      state.objects.push(obj);
+      mountImage(obj, page);
+      setActive(obj.id);
+      updateButtons();
+    } catch (e) {
+      console.error(e);
+      setStatus('이미지를 추가할 수 없습니다. 지원하지 않는 형식일 수 있습니다.', true);
+    }
+  }
+
+  function mountImage(obj, page) {
+    const el = document.createElement('div');
+    el.className = 'obj image';
+    // img 태그 대신 canvas를 써서 브라우저의 자동 크기 조정을 피한다. (참고: Image.svelte render)
+    const canvas = document.createElement('canvas');
+    canvas.width = obj.img.naturalWidth;
+    canvas.height = obj.img.naturalHeight;
+    canvas.getContext('2d').drawImage(obj.img, 0, 0);
+    el.appendChild(canvas);
+    ['left-top', 'top', 'right-top', 'right', 'right-bottom', 'bottom', 'left-bottom', 'left'].forEach((dir) => {
+      const h = document.createElement('div');
+      h.className = 'handle';
+      h.dataset.dir = dir;
+      el.appendChild(h);
+    });
+    page.layer.appendChild(el);
+    obj.el = el;
+    placeObject(obj);
+    makeDraggable(obj, { resizable: true });
+  }
+
+  // ---- 공통: 위치 반영, 드래그 이동, 리사이즈 (참고: utils/pannable.js, Image.svelte) ----
+  function placeObject(obj, d = { dx: 0, dy: 0, dw: 0, dh: 0 }) {
+    obj.el.style.transform = `translate(${obj.x + d.dx}px, ${obj.y + d.dy}px)`;
+    if (obj.type === 'image') {
+      obj.el.style.width = obj.width + d.dw + 'px';
+      obj.el.style.height = obj.height + d.dh + 'px';
+    }
+  }
+
+  let shiftDown = false;
+  window.addEventListener('keydown', (e) => { if (e.key === 'Shift') shiftDown = true; });
+  window.addEventListener('keyup', (e) => { if (e.key === 'Shift') shiftDown = false; });
+  window.addEventListener('blur', () => { shiftDown = false; });
+
+  // Shift 비율 유지 계산 (Image.svelte calculateDimensionWithRatio 를 옮김)
+  function withRatio(obj, ratio, dw, dh) {
+    const dhFromDw = (obj.width + dw) / ratio - obj.height;
+    if (dh > dhFromDw) {
+      const dwFromDh = (obj.height + dh) * ratio - obj.width;
+      return [dwFromDh, dh];
+    }
+    return [dw, dhFromDw];
+  }
+
+  function resizeDelta(obj, dir, mx, my, ratio) {
+    let dx = 0, dy = 0, dw = 0, dh = 0;
+    const left = dir.includes('left');
+    const right = dir.includes('right');
+    const top = dir.includes('top');
+    const bottom = dir.includes('bottom');
+    if (left) dw = -mx;
+    if (right) dw = mx;
+    if (top) dh = -my;
+    if (bottom) dh = my;
+    if (ratio !== null) {
+      [dw, dh] = withRatio(obj, ratio, left || right ? dw : -Infinity, top || bottom ? dh : -Infinity);
+    }
+    // 최소 크기 보장
+    const min = 8;
+    if (obj.width + dw < min) {
+      dw = min - obj.width;
+      if (ratio !== null) dh = (obj.width + dw) / ratio - obj.height;
+    }
+    if (obj.height + dh < min) {
+      dh = min - obj.height;
+      if (ratio !== null) dw = (obj.height + dh) * ratio - obj.width;
+    }
+    if (left) dx = -dw;
+    if (top) dy = -dh;
+    return { dx, dy, dw, dh };
+  }
+
+  function makeDraggable(obj, { onTap, ignore, resizable } = {}) {
+    const el = obj.el;
+    el.addEventListener('pointerdown', (e) => {
+      if (e.button !== 0) return;
+      if (ignore && ignore(e)) return;
+      e.preventDefault();
+      e.stopPropagation();
+      selectPage(obj.page);
+      // 다른 텍스트를 편집 중이었다면 먼저 확정한다.
+      if (document.activeElement && document.activeElement !== obj.editable) document.activeElement.blur();
+      setActive(obj.id);
+
+      const page = state.pages[obj.page];
+      const startX = e.clientX;
+      const startY = e.clientY;
+      const dir = resizable && e.target.classList.contains('handle') ? e.target.dataset.dir : null;
+      const ratio0 = obj.type === 'image' ? obj.width / obj.height : null;
+      let delta = { dx: 0, dy: 0, dw: 0, dh: 0 };
+      let moved = false;
+      el.setPointerCapture(e.pointerId);
+      el.classList.add('dragging');
+
+      const onMove = (ev) => {
+        const mx = (ev.clientX - startX) / page.scale;
+        const my = (ev.clientY - startY) / page.scale;
+        if (!moved && Math.hypot(ev.clientX - startX, ev.clientY - startY) < 3) return;
+        moved = true;
+        delta = dir
+          ? resizeDelta(obj, dir, mx, my, shiftDown ? ratio0 : null)
+          : { dx: mx, dy: my, dw: 0, dh: 0 };
+        placeObject(obj, delta);
+      };
+      const onUp = () => {
+        el.removeEventListener('pointermove', onMove);
+        el.removeEventListener('pointerup', onUp);
+        el.removeEventListener('pointercancel', onUp);
+        el.classList.remove('dragging');
+        if (moved) {
+          obj.x += delta.dx;
+          obj.y += delta.dy;
+          if (obj.type === 'image') {
+            obj.width += delta.dw;
+            obj.height += delta.dh;
+          }
+          placeObject(obj);
+        } else if (onTap) {
+          onTap();
+        }
+      };
+      el.addEventListener('pointermove', onMove);
+      el.addEventListener('pointerup', onUp);
+      el.addEventListener('pointercancel', onUp);
+    });
+  }
+
+  function getObject(id) {
+    return state.objects.find((o) => o.id === id) || null;
+  }
+
+  function setActive(id) {
+    state.activeId = id;
+    state.objects.forEach((o) => o.el.classList.toggle('active', o.id === id));
+    updateTools();
+  }
+
+  function deleteObject(id) {
+    const obj = getObject(id);
+    if (!obj) return;
+    obj.el.remove();
+    state.objects = state.objects.filter((o) => o.id !== id);
+    if (state.activeId === id) setActive(null);
+    updateButtons();
+  }
+
+  // ---- 상단 도구 막대 ----
+  function updateButtons() {
+    const hasPdf = state.pages.length > 0;
+    els.addTextBtn.disabled = !hasPdf;
+    els.addImageBtn.disabled = !hasPdf;
+    els.saveBtn.disabled = !hasPdf || state.saving;
+  }
+
+  function updateTools() {
+    const obj = getObject(state.activeId);
+    els.textTools.hidden = !obj || obj.type !== 'text';
+    els.imageTools.hidden = !obj || obj.type !== 'image';
+    if (obj && obj.type === 'text') {
+      els.fontSelect.value = obj.fontFamily;
+      els.sizeInput.value = obj.size;
+      els.lineHeightInput.value = obj.lineHeight;
+      els.colorInput.value = obj.color;
+    }
+  }
+
+  function updateActiveText(patch) {
+    const obj = getObject(state.activeId);
+    if (!obj || obj.type !== 'text') return;
+    Object.assign(obj, patch);
+    applyTextStyle(obj);
+  }
+
+  // 도구 막대를 누르는 동안 텍스트 편집 상태가 풀리지 않도록 포커스 이동을 막는다.
+  [els.textTools, els.imageTools].forEach((bar) => {
+    bar.addEventListener('mousedown', (e) => {
+      if (!['SELECT', 'INPUT'].includes(e.target.tagName)) e.preventDefault();
+    });
+  });
+
+  els.fontSelect.addEventListener('change', () => {
+    const name = els.fontSelect.value;
+    state.lastFont = name;
+    if (name === 'NanumGothic') {
+      loadNanum().catch(() => setStatus('한글 폰트를 불러오지 못했습니다.', true));
+    }
+    updateActiveText({ fontFamily: name });
+  });
+  els.sizeInput.addEventListener('input', () => {
+    const v = parseFloat(els.sizeInput.value);
+    if (v >= 4 && v <= 200) updateActiveText({ size: v });
+  });
+  els.lineHeightInput.addEventListener('input', () => {
+    const v = parseFloat(els.lineHeightInput.value);
+    if (v >= 1 && v <= 5) updateActiveText({ lineHeight: v });
+  });
+  els.colorInput.addEventListener('input', () => updateActiveText({ color: els.colorInput.value }));
+  els.deleteTextBtn.addEventListener('click', () => deleteObject(state.activeId));
+  els.deleteImageBtn.addEventListener('click', () => deleteObject(state.activeId));
+
+  window.addEventListener('keydown', (e) => {
+    const obj = getObject(state.activeId);
+    if (!obj || obj.editing) return;
+    if (['INPUT', 'SELECT', 'TEXTAREA'].includes(document.activeElement && document.activeElement.tagName)) return;
+    if (e.key === 'Delete' || e.key === 'Backspace') {
+      e.preventDefault();
+      deleteObject(obj.id);
+    }
+  });
+
+  // ---- 저장 (참고: utils/PDF.js save) ----
+  function hexToRgb(hex) {
+    const n = parseInt(hex.slice(1), 16);
+    return PDFLib.rgb(((n >> 16) & 255) / 255, ((n >> 8) & 255) / 255, (n & 255) / 255);
+  }
+
+  // 화면에서 줄 상자 맨 위부터 글자 기준선(baseline)까지의 거리.
+  // CSS는 글꼴의 ascent+descent 영역을 줄 높이 가운데에 놓으므로 같은 방식으로 계산한다.
+  const measureCtx = document.createElement('canvas').getContext('2d');
+  function baselineOffset(obj) {
+    measureCtx.font = `${obj.size}px ${FONTS[obj.fontFamily].css}`;
+    const m = measureCtx.measureText('Hg가');
+    let ascent = m.fontBoundingBoxAscent;
+    let descent = m.fontBoundingBoxDescent;
+    if (!(ascent > 0)) {
+      ascent = obj.size * 0.8;
+      descent = obj.size * 0.2;
+    }
+    return (obj.size * obj.lineHeight - (ascent + descent)) / 2 + ascent;
+  }
+
+  function canEncode(font, lines) {
+    try {
+      lines.forEach((l) => font.encodeText(l));
+      return true;
+    } catch (e) {
+      return false;
+    }
+  }
+
+  async function savePDF() {
+    if (!state.pdfBytes || state.saving) return;
+    if (document.activeElement && document.activeElement.blur) document.activeElement.blur();
+    state.saving = true;
+    updateButtons();
+    setStatus('PDF를 저장하는 중...');
+    try {
+      const { PDFDocument, StandardFonts, degrees } = PDFLib;
+      const doc = await PDFDocument.load(state.pdfBytes, { ignoreEncryption: true });
+      doc.registerFontkit(fontkit);
+      const pdfPages = doc.getPages();
+      const fontCache = {};
+      let nanumFallback = false;
+
+      async function getFont(name) {
+        if (!fontCache[name]) {
+          const def = FONTS[name];
+          fontCache[name] = def.standard
+            ? doc.embedFont(StandardFonts[def.standard])
+            : loadNanum().then((buf) => doc.embedFont(buf, { subset: true }));
+        }
+        return fontCache[name];
+      }
+
+      for (const obj of state.objects) {
+        const page = state.pages[obj.page];
+        const pdfPage = pdfPages[obj.page];
+        const vp = page.viewport;
+        // 화면 좌표(y는 위에서부터)를 PDF 사용자 좌표(y는 아래에서부터)로 바꾼다.
+        // convertToPdfPoint는 CropBox 원점과 페이지 회전(/Rotate)까지 반영한다.
+        const toPdf = (x, y) => vp.convertToPdfPoint(x, y);
+        const rotate = degrees(vp.rotation);
+
+        if (obj.type === 'image') {
+          const image = obj.mime === 'image/jpeg' ? await doc.embedJpg(obj.bytes) : await doc.embedPng(obj.bytes);
+          const [x, y] = toPdf(obj.x, obj.y + obj.height); // 이미지의 왼쪽 아래 모서리
+          pdfPage.drawImage(image, { x, y, width: obj.width, height: obj.height, rotate });
+        } else if (obj.type === 'text') {
+          let fontName = obj.fontFamily;
+          let font = await getFont(fontName);
+          if (!canEncode(font, obj.lines)) {
+            // 표준 폰트로 표현할 수 없는 글자(한글 등)가 있으면 나눔고딕으로 대체한다.
+            fontName = 'NanumGothic';
+            font = await getFont(fontName);
+            nanumFallback = true;
+          }
+          const offset = baselineOffset(obj);
+          const color = hexToRgb(obj.color);
+          obj.lines.forEach((line, i) => {
+            if (!line) return;
+            const [x, y] = toPdf(obj.x, obj.y + i * obj.size * obj.lineHeight + offset);
+            pdfPage.drawText(line, { x, y, size: obj.size, font, color, rotate });
+          });
+        }
+      }
+
+      const out = await doc.save();
+      const blob = new Blob([out], { type: 'application/pdf' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = state.pdfName.replace(/\.pdf$/i, '') + '-edited.pdf';
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 10000);
+      setStatus(nanumFallback
+        ? '저장했습니다. 선택한 글꼴로 표현할 수 없는 글자가 있어 일부 텍스트는 나눔고딕으로 저장했습니다.'
+        : '저장했습니다.');
+    } catch (e) {
+      console.error(e);
+      setStatus('저장에 실패했습니다: ' + (e && e.message ? e.message : e), true);
+    } finally {
+      state.saving = false;
+      updateButtons();
+    }
+  }
+
+  // ---- 이벤트 연결 ----
+  els.pdfInput.addEventListener('change', (e) => {
+    openPDF(e.target.files[0]);
+    e.target.value = '';
+  });
+  els.imageInput.addEventListener('change', (e) => {
+    addImage(e.target.files[0]);
+    e.target.value = '';
+  });
+  els.addTextBtn.addEventListener('click', addText);
+  els.addImageBtn.addEventListener('click', () => els.imageInput.click());
+  els.saveBtn.addEventListener('click', savePDF);
+  els.dropzone.addEventListener('click', () => els.pdfInput.click());
+
+  window.addEventListener('dragover', (e) => {
+    e.preventDefault();
+    els.dropzone.classList.add('over');
+  });
+  window.addEventListener('dragleave', () => els.dropzone.classList.remove('over'));
+  window.addEventListener('drop', (e) => {
+    e.preventDefault();
+    els.dropzone.classList.remove('over');
+    const file = e.dataTransfer.files[0];
+    if (!file) return;
+    if (file.type.startsWith('image/') && state.pages.length) addImage(file);
+    else openPDF(file);
+  });
+})();
+</script>
+</body>
+</html>
