@@ -1,0 +1,1629 @@
+<!DOCTYPE html>
+<!--
+  PDF 편집기 (텍스트 · 이미지 · 하이라이트 · 도형 · 펜 · 실행취소/다시실행)
+
+  이 웹앱의 PDF 편집 로직은 다음 오픈소스 레포를 참고해 바닐라 JavaScript로 다시 작성했습니다.
+    - 참고 레포: ShizukuIchi/pdf-editor (https://github.com/ShizukuIchi/pdf-editor)
+    - 라이선스 : MIT License, Copyright (c) 2020 ShizukuIchi
+
+  참고한 부분
+    - pdf.js로 각 페이지를 scale 1 뷰포트로 canvas에 렌더링하고, 화면 크기에 맞춘 배율(pageScale)로
+      드래그 이동량을 PDF 좌표로 환산하는 방식 (PDFPage.svelte, Text.svelte, Image.svelte)
+    - 이미지 객체의 8방향 리사이즈 핸들과 Shift 키 비율 유지 계산 (Image.svelte)
+    - JPEG/PNG가 아닌 이미지를 canvas로 PNG 변환해 임베드하는 처리 (Image.svelte)
+    - 자유 그리기를 SVG path로 저장하고 pdf-lib drawSvgPath + 둥근 선 끝/이음으로 그리는 방식
+      (DrawingCanvas.svelte, utils/PDF.js)
+    - pdf-lib로 원본 PDF를 불러와 페이지별 객체를 그리고, PDF의 y축이 아래에서 시작하는 점을
+      보정해 저장하는 흐름 (utils/PDF.js)
+    - FileReader를 Promise로 감싼 파일 읽기 유틸 (utils/asyncReader.js)
+
+  디자인
+    - 토스 디자인 시스템(TDS)의 색상 팔레트(Grey/Blue 등), 버튼(Primary/Weak), 토스트, 스위치,
+      둥근 모서리 스타일을 참고해 CSS로 직접 구현했습니다. TDS 공식 패키지는 사용하지 않았습니다.
+    - TDS 기본 글꼴인 Toss Product Sans는 공개 배포되지 않아 Pretendard(OFL-1.1)로 대체했습니다.
+
+  사용 라이브러리
+    - pdf.js (Apache-2.0), pdf-lib (MIT), @pdf-lib/fontkit (MIT), 나눔고딕 폰트 (OFL-1.1)
+-->
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>PDF 편집기</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/variable/pretendardvariable-dynamic-subset.min.css">
+<style>
+  /* TDS 색상 토큰 */
+  :root {
+    --grey50: #f9fafb;
+    --grey100: #f2f4f6;
+    --grey200: #e5e8eb;
+    --grey300: #d1d6db;
+    --grey400: #b0b8c1;
+    --grey500: #8b95a1;
+    --grey600: #6b7684;
+    --grey700: #4e5968;
+    --grey800: #333d4b;
+    --grey900: #191f28;
+    --blue50: #e8f3ff;
+    --blue100: #c9e2ff;
+    --blue500: #3182f6;
+    --blue600: #2272eb;
+    --blue700: #1b64da;
+    --red500: #f04452;
+    --red50: #ffeeee;
+    --white: #ffffff;
+    --shadow: 0 2px 8px rgba(0, 0, 0, 0.06), 0 1px 2px rgba(0, 0, 0, 0.04);
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    min-height: 100vh;
+    font-family: "Pretendard Variable", Pretendard, -apple-system, BlinkMacSystemFont, "Apple SD Gothic Neo",
+      "Noto Sans KR", "Segoe UI", Roboto, sans-serif;
+    background: var(--grey100);
+    color: var(--grey900);
+    -webkit-font-smoothing: antialiased;
+    letter-spacing: -0.01em;
+  }
+  button, input, select { font: inherit; letter-spacing: inherit; }
+  input[type="file"] { display: none; }
+  svg.icon {
+    width: 22px;
+    height: 22px;
+    fill: none;
+    stroke: currentColor;
+    stroke-width: 2;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+    flex-shrink: 0;
+  }
+
+  /* ---- 상단 앱 바 ---- */
+  header {
+    position: sticky;
+    top: 0;
+    z-index: 20;
+    background: var(--white);
+    box-shadow: 0 1px 0 var(--grey200);
+  }
+  .appbar {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    max-width: 1080px;
+    margin: 0 auto;
+    padding: 10px 16px;
+  }
+  .title { flex: 1; min-width: 0; }
+  h1 { font-size: 18px; font-weight: 700; margin: 0; }
+  .file-name {
+    display: block;
+    margin-top: 2px;
+    font-size: 13px;
+    color: var(--grey500);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  /* TDS 버튼 */
+  .btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    height: 40px;
+    padding: 0 16px;
+    border: 0;
+    border-radius: 10px;
+    font-size: 15px;
+    font-weight: 600;
+    cursor: pointer;
+    white-space: nowrap;
+    transition: background-color 0.15s, color 0.15s, transform 0.1s;
+  }
+  .btn:active:not(:disabled) { transform: scale(0.97); }
+  .btn:disabled { opacity: 0.4; cursor: not-allowed; }
+  .btn[hidden] { display: none; }
+  .btn .icon { width: 18px; height: 18px; }
+  .btn-primary { background: var(--blue500); color: var(--white); }
+  .btn-primary:hover:not(:disabled) { background: var(--blue600); }
+  .btn-weak { background: var(--blue50); color: var(--blue700); }
+  .btn-weak:hover:not(:disabled) { background: var(--blue100); }
+  .btn-grey { background: var(--grey100); color: var(--grey700); }
+  .btn-grey:hover:not(:disabled) { background: var(--grey200); }
+  .btn-danger { background: var(--red50); color: var(--red500); }
+  .btn-danger:hover:not(:disabled) { background: #ffdcdc; }
+  .btn-sm { height: 32px; padding: 0 12px; font-size: 13px; border-radius: 8px; }
+
+  /* ---- 도구 막대 ---- */
+  .toolbar-wrap { border-top: 1px solid var(--grey100); }
+  .toolbar {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    max-width: 1080px;
+    margin: 0 auto;
+    padding: 6px 16px;
+    overflow-x: auto;
+    scrollbar-width: none;
+  }
+  .toolbar::-webkit-scrollbar { display: none; }
+  .tool {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 2px;
+    min-width: 52px;
+    padding: 6px 6px 4px;
+    border: 0;
+    border-radius: 10px;
+    background: transparent;
+    color: var(--grey600);
+    font-size: 11px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: background-color 0.15s, color 0.15s;
+  }
+  .tool:hover:not(:disabled) { background: var(--grey100); color: var(--grey800); }
+  .tool.active, .tool.active:hover { background: var(--blue50); color: var(--blue500); }
+  .tool:disabled { opacity: 0.35; cursor: not-allowed; }
+  .divider { width: 1px; height: 32px; background: var(--grey200); margin: 0 6px; flex-shrink: 0; }
+  .spacer { flex: 1; }
+
+  /* ---- 속성 패널 ---- */
+  .props-wrap { border-top: 1px solid var(--grey100); background: var(--grey50); }
+  .props-wrap[hidden] { display: none; }
+  .props {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 10px 18px;
+    max-width: 1080px;
+    margin: 0 auto;
+    padding: 10px 16px;
+    font-size: 13px;
+  }
+  .field { display: flex; align-items: center; gap: 8px; color: var(--grey600); font-weight: 500; }
+  .field[hidden] { display: none; }
+  .swatches { display: flex; align-items: center; gap: 6px; }
+  .swatch {
+    width: 24px;
+    height: 24px;
+    padding: 0;
+    border: 0;
+    border-radius: 50%;
+    cursor: pointer;
+    box-shadow: inset 0 0 0 1px rgba(0, 0, 0, 0.08);
+  }
+  .swatch.selected { box-shadow: 0 0 0 2px var(--white), 0 0 0 4px var(--blue500); }
+  .custom-color {
+    position: relative;
+    width: 24px;
+    height: 24px;
+    border-radius: 50%;
+    background: conic-gradient(#f04452, #ffc342, #03b26c, #3182f6, #a234c7, #f04452);
+    overflow: hidden;
+    cursor: pointer;
+  }
+  .custom-color.selected { box-shadow: 0 0 0 2px var(--white), 0 0 0 4px var(--blue500); }
+  .custom-color input { position: absolute; inset: 0; opacity: 0; cursor: pointer; width: 100%; height: 100%; }
+  .input {
+    height: 32px;
+    padding: 0 10px;
+    border: 0;
+    border-radius: 8px;
+    background: var(--white);
+    box-shadow: inset 0 0 0 1px var(--grey200);
+    color: var(--grey900);
+    font-size: 14px;
+    font-weight: 500;
+  }
+  .input:focus { outline: none; box-shadow: inset 0 0 0 2px var(--blue500); }
+  input.input[type="number"] { width: 68px; }
+  /* TDS 스위치 */
+  .switch {
+    position: relative;
+    width: 40px;
+    height: 24px;
+    padding: 0;
+    border: 0;
+    border-radius: 12px;
+    background: var(--grey300);
+    cursor: pointer;
+    transition: background-color 0.2s;
+  }
+  .switch::after {
+    content: "";
+    position: absolute;
+    top: 2px;
+    left: 2px;
+    width: 20px;
+    height: 20px;
+    border-radius: 50%;
+    background: var(--white);
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.2);
+    transition: transform 0.2s;
+  }
+  .switch[aria-checked="true"] { background: var(--blue500); }
+  .switch[aria-checked="true"]::after { transform: translateX(16px); }
+  .hint { color: var(--grey500); font-weight: 400; }
+
+  /* ---- 본문 ---- */
+  main { max-width: 1080px; margin: 0 auto; padding: 20px 16px 96px; }
+  .empty {
+    margin: 24px auto 0;
+    max-width: 480px;
+    background: var(--white);
+    border-radius: 20px;
+    box-shadow: var(--shadow);
+    padding: 48px 24px;
+    text-align: center;
+    transition: box-shadow 0.15s;
+  }
+  .empty.over { box-shadow: 0 0 0 2px var(--blue500), var(--shadow); }
+  .empty-icon {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 64px;
+    height: 64px;
+    border-radius: 20px;
+    background: var(--blue50);
+    color: var(--blue500);
+    margin-bottom: 16px;
+  }
+  .empty-icon .icon { width: 30px; height: 30px; }
+  .empty h2 { font-size: 20px; font-weight: 700; margin: 0 0 8px; }
+  .empty p { font-size: 15px; color: var(--grey600); margin: 0 0 24px; line-height: 1.5; }
+  .empty .btn { height: 48px; padding: 0 24px; font-size: 16px; border-radius: 14px; }
+
+  .pages { display: flex; flex-direction: column; align-items: center; gap: 24px; }
+  .page-outer {
+    position: relative;
+    background: var(--white);
+    border-radius: 2px;
+    box-shadow: var(--shadow);
+    outline: 2px solid transparent;
+    outline-offset: 4px;
+    transition: outline-color 0.15s;
+  }
+  .page-outer.selected { outline-color: var(--blue500); }
+  .page-label {
+    position: absolute;
+    top: 100%;
+    left: 50%;
+    transform: translateX(-50%);
+    margin-top: 6px;
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--grey500);
+  }
+  .page-inner { position: absolute; left: 0; top: 0; transform-origin: 0 0; }
+  .page-inner canvas { display: block; width: 100%; height: 100%; }
+  .layer { position: absolute; inset: 0; overflow: hidden; }
+  body.mode-draw .layer { cursor: crosshair; }
+  body.mode-text .layer { cursor: text; }
+  body.mode-draw .obj, body.mode-text .obj { pointer-events: none; }
+
+  /* ---- 편집 객체 ---- */
+  .obj {
+    position: absolute;
+    left: 0;
+    top: 0;
+    touch-action: none;
+    user-select: none;
+    -webkit-user-select: none;
+    cursor: grab;
+  }
+  .obj:hover { outline: 1px dashed var(--grey400); }
+  .obj.dragging { cursor: grabbing; }
+  .obj.active { outline: 1.5px solid var(--blue500); }
+  .obj.editing { cursor: text; outline: 1.5px dashed var(--blue500); }
+  .obj svg.shape { position: absolute; left: 0; top: 0; overflow: visible; pointer-events: none; }
+  .obj.highlight { mix-blend-mode: multiply; }
+  .obj .editable { white-space: pre; outline: none; min-width: 4px; padding: 0; margin: 0; }
+  .obj.editing .editable { user-select: text; -webkit-user-select: text; }
+  .obj.image canvas { display: block; width: 100%; height: 100%; pointer-events: none; }
+  .handle {
+    position: absolute;
+    width: 12px;
+    height: 12px;
+    margin: -6px 0 0 -6px;
+    background: var(--white);
+    border: 2px solid var(--blue500);
+    border-radius: 50%;
+    display: none;
+  }
+  .obj.active .handle { display: block; }
+  .handle[data-dir="left-top"] { left: 0; top: 0; cursor: nwse-resize; }
+  .handle[data-dir="top"] { left: 50%; top: 0; cursor: ns-resize; }
+  .handle[data-dir="right-top"] { left: 100%; top: 0; cursor: nesw-resize; }
+  .handle[data-dir="right"] { left: 100%; top: 50%; cursor: ew-resize; }
+  .handle[data-dir="right-bottom"] { left: 100%; top: 100%; cursor: nwse-resize; }
+  .handle[data-dir="bottom"] { left: 50%; top: 100%; cursor: ns-resize; }
+  .handle[data-dir="left-bottom"] { left: 0; top: 100%; cursor: nesw-resize; }
+  .handle[data-dir="left"] { left: 0; top: 50%; cursor: ew-resize; }
+
+  /* ---- TDS 토스트 ---- */
+  .toast {
+    position: fixed;
+    left: 50%;
+    bottom: 24px;
+    z-index: 50;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    max-width: calc(100% - 32px);
+    padding: 14px 20px;
+    border-radius: 16px;
+    background: rgba(25, 31, 40, 0.92);
+    color: var(--white);
+    font-size: 15px;
+    font-weight: 500;
+    line-height: 1.4;
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.16);
+    transform: translate(-50%, 16px);
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.2s, transform 0.2s;
+  }
+  .toast.show { opacity: 1; transform: translate(-50%, 0); }
+  .toast .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--blue500); flex-shrink: 0; }
+  .toast.error .dot { background: var(--red500); }
+
+  @media (max-width: 640px) {
+    .appbar .btn { padding: 0 12px; }
+    .appbar .btn .label { display: none; }
+    .tool { min-width: 46px; }
+    .handle { width: 18px; height: 18px; margin: -9px 0 0 -9px; }
+  }
+</style>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <symbol id="i-select" viewBox="0 0 24 24"><path d="M5 3l13 7.5-5.5 1.5L10 18z"/><path d="M12.5 12l5 5"/></symbol>
+  <symbol id="i-text" viewBox="0 0 24 24"><path d="M5 7V5h14v2"/><path d="M12 5v14"/><path d="M9 19h6"/></symbol>
+  <symbol id="i-image" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="3"/><circle cx="9" cy="10" r="2"/><path d="M21 16l-5-5-10 9"/></symbol>
+  <symbol id="i-highlight" viewBox="0 0 24 24"><path d="M14.5 4.5l5 5-8 8H6.5v-5z"/><path d="M4 21h16"/></symbol>
+  <symbol id="i-rect" viewBox="0 0 24 24"><rect x="4" y="6" width="16" height="12" rx="1.5"/></symbol>
+  <symbol id="i-ellipse" viewBox="0 0 24 24"><ellipse cx="12" cy="12" rx="8.5" ry="6.5"/></symbol>
+  <symbol id="i-pen" viewBox="0 0 24 24"><path d="M3 17c2.5-5 5-6 6.5-3.5S12 18 15 13s4-7 6-7"/></symbol>
+  <symbol id="i-undo" viewBox="0 0 24 24"><path d="M9 14L4 9l5-5"/><path d="M4 9h10.5a5.5 5.5 0 010 11H11"/></symbol>
+  <symbol id="i-redo" viewBox="0 0 24 24"><path d="M15 14l5-5-5-5"/><path d="M20 9H9.5a5.5 5.5 0 000 11H13"/></symbol>
+  <symbol id="i-folder" viewBox="0 0 24 24"><path d="M3 7.5A2.5 2.5 0 015.5 5H9l2 2h7.5A2.5 2.5 0 0121 9.5v8a2.5 2.5 0 01-2.5 2.5h-13A2.5 2.5 0 013 17.5z"/></symbol>
+  <symbol id="i-download" viewBox="0 0 24 24"><path d="M12 4v11"/><path d="M7 10l5 5 5-5"/><path d="M5 20h14"/></symbol>
+  <symbol id="i-trash" viewBox="0 0 24 24"><path d="M4 7h16"/><path d="M10 11v6M14 11v6"/><path d="M6 7l1 13h10l1-13"/><path d="M9 7V4h6v3"/></symbol>
+  <symbol id="i-doc" viewBox="0 0 24 24"><path d="M14 3H7a2 2 0 00-2 2v14a2 2 0 002 2h10a2 2 0 002-2V8z"/><path d="M14 3v5h5"/><path d="M9 13h6M9 17h4"/></symbol>
+</svg>
+
+<header>
+  <div class="appbar">
+    <div class="title">
+      <h1>PDF 편집기</h1>
+      <span class="file-name" id="fileName">PDF 파일을 열어주세요</span>
+    </div>
+    <button class="btn btn-grey" id="openBtn" title="PDF 열기"><svg class="icon"><use href="#i-folder"/></svg><span class="label">열기</span></button>
+    <button class="btn btn-primary" id="saveBtn" disabled title="PDF 저장"><svg class="icon"><use href="#i-download"/></svg><span class="label">저장</span></button>
+    <input type="file" id="pdfInput" accept="application/pdf,.pdf">
+    <input type="file" id="imageInput" accept="image/*">
+  </div>
+  <div class="toolbar-wrap">
+    <div class="toolbar" role="toolbar" aria-label="편집 도구">
+      <button class="tool" data-tool="select" title="선택 (V)"><svg class="icon"><use href="#i-select"/></svg>선택</button>
+      <button class="tool" data-tool="text" title="텍스트 (T)"><svg class="icon"><use href="#i-text"/></svg>텍스트</button>
+      <button class="tool" id="imageTool" title="이미지 (I)"><svg class="icon"><use href="#i-image"/></svg>이미지</button>
+      <button class="tool" data-tool="highlight" title="하이라이트 (H)"><svg class="icon"><use href="#i-highlight"/></svg>형광펜</button>
+      <button class="tool" data-tool="rect" title="사각형 (R)"><svg class="icon"><use href="#i-rect"/></svg>사각형</button>
+      <button class="tool" data-tool="ellipse" title="원형 (O)"><svg class="icon"><use href="#i-ellipse"/></svg>원형</button>
+      <button class="tool" data-tool="pen" title="펜 (P)"><svg class="icon"><use href="#i-pen"/></svg>펜</button>
+      <span class="divider"></span>
+      <button class="tool" id="undoBtn" title="실행취소 (Ctrl+Z)"><svg class="icon"><use href="#i-undo"/></svg>실행취소</button>
+      <button class="tool" id="redoBtn" title="다시실행 (Ctrl+Shift+Z)"><svg class="icon"><use href="#i-redo"/></svg>다시실행</button>
+    </div>
+  </div>
+  <div class="props-wrap" id="propsWrap" hidden>
+    <div class="props">
+      <div class="field" data-prop="color">
+        색상
+        <div class="swatches" id="swatches"></div>
+      </div>
+      <label class="field" data-prop="strokeWidth">두께 <input class="input" type="number" id="strokeInput" min="1" max="40" step="1"></label>
+      <div class="field" data-prop="fill">채우기 <button class="switch" id="fillSwitch" role="switch" aria-checked="false" aria-label="채우기"></button></div>
+      <label class="field" data-prop="fontFamily">글꼴
+        <select class="input" id="fontSelect">
+          <option value="NanumGothic">나눔고딕 (한글)</option>
+          <option value="Helvetica">Helvetica</option>
+          <option value="Times-Roman">Times-Roman</option>
+          <option value="Courier">Courier</option>
+        </select>
+      </label>
+      <label class="field" data-prop="size">크기 <input class="input" type="number" id="sizeInput" min="4" max="200" step="1"></label>
+      <label class="field" data-prop="lineHeight">줄 간격 <input class="input" type="number" id="lineHeightInput" min="1" max="5" step="0.1"></label>
+      <span class="hint" id="propsHint"></span>
+      <span class="spacer"></span>
+      <button class="btn btn-danger btn-sm" id="deleteBtn"><svg class="icon"><use href="#i-trash"/></svg>삭제</button>
+    </div>
+  </div>
+</header>
+
+<main>
+  <div class="empty" id="empty">
+    <div class="empty-icon"><svg class="icon"><use href="#i-doc"/></svg></div>
+    <h2>편집할 PDF를 선택해 주세요</h2>
+    <p>파일을 여기로 끌어다 놓아도 돼요.<br>파일은 서버로 전송되지 않고 브라우저에서만 처리돼요.</p>
+    <button class="btn btn-primary" id="emptyOpenBtn">PDF 열기</button>
+  </div>
+  <div class="pages" id="pages"></div>
+</main>
+
+<div class="toast" id="toast" role="status" aria-live="polite"><span class="dot"></span><span id="toastText"></span></div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf-lib/1.17.1/pdf-lib.min.js"></script>
+<script src="https://unpkg.com/@pdf-lib/fontkit@1.1.1/dist/fontkit.umd.min.js"></script>
+<script>
+(() => {
+  'use strict';
+
+  const PDFJS_WORKER = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+  const NANUM_URL = 'https://cdn.jsdelivr.net/npm/@kfonts/nanum-gothic@0.2.0/NanumGothic.woff';
+
+  // 글꼴 정의. 표준 14 폰트는 PDF 뷰어에 내장되어 있어 임베드가 필요 없지만 한글을 표현할 수 없다.
+  const FONTS = {
+    NanumGothic: { css: '"NanumGothicEmbed", sans-serif', standard: null },
+    Helvetica: { css: 'Helvetica, Arial, sans-serif', standard: 'Helvetica' },
+    'Times-Roman': { css: '"Times New Roman", Times, serif', standard: 'TimesRoman' },
+    Courier: { css: '"Courier New", Courier, monospace', standard: 'Courier' },
+  };
+
+  // TDS 팔레트에서 고른 색상 견본
+  const PALETTE = ['#191F28', '#F04452', '#FE9800', '#FFC342', '#03B26C', '#3182F6', '#A234C7'];
+  const HIGHLIGHT_OPACITY = 0.4;
+  const FILL_OPACITY = 0.2;
+
+  // 도구별 속성 패널 항목
+  const PROPS = {
+    text: ['color', 'fontFamily', 'size', 'lineHeight'],
+    image: [],
+    highlight: ['color'],
+    rect: ['color', 'strokeWidth', 'fill'],
+    ellipse: ['color', 'strokeWidth', 'fill'],
+    pen: ['color', 'strokeWidth'],
+  };
+  const DRAW_TOOLS = ['highlight', 'rect', 'ellipse', 'pen'];
+  const RESIZABLE = ['image', 'highlight', 'rect', 'ellipse', 'pen'];
+  const HINTS = {
+    select: '',
+    text: '페이지를 클릭한 곳에 텍스트를 넣어요',
+    highlight: '드래그해서 영역을 칠해요',
+    rect: '드래그해서 그려요 · Shift: 정사각형',
+    ellipse: '드래그해서 그려요 · Shift: 정원',
+    pen: '드래그해서 자유롭게 그려요',
+    image: '모서리를 드래그해 크기 조절 · Shift: 비율 유지',
+  };
+
+  const $ = (id) => document.getElementById(id);
+  const els = {
+    fileName: $('fileName'), pdfInput: $('pdfInput'), imageInput: $('imageInput'),
+    openBtn: $('openBtn'), emptyOpenBtn: $('emptyOpenBtn'), saveBtn: $('saveBtn'),
+    imageTool: $('imageTool'), undoBtn: $('undoBtn'), redoBtn: $('redoBtn'),
+    propsWrap: $('propsWrap'), swatches: $('swatches'), strokeInput: $('strokeInput'),
+    fillSwitch: $('fillSwitch'), fontSelect: $('fontSelect'), sizeInput: $('sizeInput'),
+    lineHeightInput: $('lineHeightInput'), propsHint: $('propsHint'), deleteBtn: $('deleteBtn'),
+    empty: $('empty'), pages: $('pages'), toast: $('toast'), toastText: $('toastText'),
+  };
+  const toolButtons = Array.from(document.querySelectorAll('.tool[data-tool]'));
+  // 데스크톱 앱(Electron)에서 실행되면 preload가 window.pdfAgent를 제공한다. 브라우저에서는 null.
+  const desktop = window.pdfAgent || null;
+  const BASE_TITLE = document.title;
+
+  // 편집 객체는 순수 데이터로만 보관하고(실행취소 스냅숏 대상), 화면 요소는 views에 따로 둔다.
+  const state = {
+    pdfBytes: null,
+    pdfName: '',
+    pdfPath: null,  // 데스크톱: 원본 파일 경로
+    savePath: null, // 데스크톱: 마지막으로 저장한 경로(Ctrl+S 시 다시 묻지 않음)
+    pages: [],      // { index, pdfPage, viewport, width, height, scale, outer, inner, layer, canvas }
+    objects: [],    // 배열 순서가 곧 그리는 순서(z-order)
+    selectedPage: -1,
+    activeId: null,
+    tool: 'select',
+    saving: false,
+    pendingNewText: null,
+    style: {
+      text: { color: '#191F28', fontFamily: 'NanumGothic', size: 16, lineHeight: 1.4 },
+      highlight: { color: '#FFC342' },
+      rect: { color: '#F04452', strokeWidth: 2, fill: false },
+      ellipse: { color: '#3182F6', strokeWidth: 2, fill: false },
+      pen: { color: '#191F28', strokeWidth: 3 },
+    },
+  };
+  const views = new Map(); // id -> { el, editable }
+  let nextId = 1;
+
+  // ---- TDS 토스트 ----
+  let toastTimer = null;
+  function toast(msg, { error = false, sticky = false } = {}) {
+    clearTimeout(toastTimer);
+    els.toastText.textContent = msg;
+    els.toast.classList.toggle('error', error);
+    els.toast.classList.add('show');
+    if (!sticky) toastTimer = setTimeout(() => els.toast.classList.remove('show'), error ? 4000 : 2200);
+  }
+
+  if (!window.pdfjsLib || !window.PDFLib || !window.fontkit) {
+    toast('라이브러리를 불러오지 못했어요. 인터넷 연결을 확인하고 새로고침해 주세요.', { error: true, sticky: true });
+    return;
+  }
+  pdfjsLib.GlobalWorkerOptions.workerSrc = PDFJS_WORKER;
+
+  // ---- 파일 읽기 유틸 (참고: utils/asyncReader.js) ----
+  function readAsArrayBuffer(file) {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(reader.result);
+      reader.onerror = reject;
+      reader.readAsArrayBuffer(file);
+    });
+  }
+  function readAsDataURL(file) {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(reader.result);
+      reader.onerror = reject;
+      reader.readAsDataURL(file);
+    });
+  }
+  function readAsImage(src) {
+    return new Promise((resolve, reject) => {
+      const img = new Image();
+      img.onload = () => resolve(img);
+      img.onerror = reject;
+      img.src = src;
+    });
+  }
+
+  // ---- 한글 폰트 로딩 (참고: utils/prepareAssets.js 의 fetchFont) ----
+  let nanumPromise = null;
+  function loadNanum() {
+    if (!nanumPromise) {
+      nanumPromise = fetch(NANUM_URL)
+        .then((r) => {
+          if (!r.ok) throw new Error('HTTP ' + r.status);
+          return r.arrayBuffer();
+        })
+        .then(async (buffer) => {
+          const face = new FontFace('NanumGothicEmbed', buffer.slice(0));
+          await face.load();
+          document.fonts.add(face);
+          return buffer;
+        })
+        .catch((e) => {
+          nanumPromise = null;
+          throw e;
+        });
+    }
+    return nanumPromise;
+  }
+
+  // ---- 실행취소 / 다시실행 ----
+  // 변경이 확정될 때마다 commit()으로 객체 목록 전체를 스냅숏으로 쌓는다.
+  // 이미지 바이트와 펜 좌표 배열은 생성 후 바꾸지 않으므로 참조를 공유해도 안전하다.
+  const history = { stack: [], index: -1, limit: 100, savedRef: null };
+  function cloneObjects(list) {
+    return list.map((o) => (o.lines ? { ...o, lines: o.lines.slice() } : { ...o }));
+  }
+  function resetHistory() {
+    history.stack = [cloneObjects(state.objects)];
+    history.index = 0;
+    history.savedRef = history.stack[0];
+    updateUndoButtons();
+  }
+  function commit() {
+    state.pendingNewText = null;
+    history.stack.splice(history.index + 1);
+    history.stack.push(cloneObjects(state.objects));
+    if (history.stack.length > history.limit) history.stack.shift();
+    history.index = history.stack.length - 1;
+    updateUndoButtons();
+  }
+  function restore() {
+    state.objects = cloneObjects(history.stack[history.index]);
+    renderAll();
+    setActive(getObject(state.activeId) ? state.activeId : null);
+    updateUndoButtons();
+  }
+  function undo() {
+    finishTextEditing();
+    if (history.index <= 0) return;
+    history.index--;
+    restore();
+  }
+  function redo() {
+    finishTextEditing();
+    if (history.index >= history.stack.length - 1) return;
+    history.index++;
+    restore();
+  }
+  function updateUndoButtons() {
+    els.undoBtn.disabled = history.index <= 0;
+    els.redoBtn.disabled = history.index < 0 || history.index >= history.stack.length - 1;
+    if (desktop) desktop.setDirty(isDirty());
+  }
+  // 마지막으로 열거나 저장한 상태와 지금 상태가 다른지
+  function isDirty() {
+    return history.index >= 0 && history.stack[history.index] !== history.savedRef;
+  }
+  function markSaved() {
+    history.savedRef = history.stack[history.index];
+    updateUndoButtons();
+  }
+
+  // ---- PDF 열기 및 렌더링 (참고: App.svelte addPDF, PDFPage.svelte) ----
+  async function openPDF(file, filePath = null, { confirmed = false } = {}) {
+    if (!file) return;
+    if (!confirmed && isDirty() && !window.confirm('저장하지 않은 변경 사항이 있어요. 새 PDF를 열까요?')) return;
+    if (file.type !== 'application/pdf' && !/\.pdf$/i.test(file.name)) {
+      toast('PDF 파일만 열 수 있어요.', { error: true });
+      return;
+    }
+    toast('PDF를 불러오고 있어요', { sticky: true });
+    try {
+      const bytes = await readAsArrayBuffer(file);
+      // pdf.js 워커로 넘기면 버퍼가 분리되므로 복사본을 넘긴다.
+      const pdf = await pdfjsLib.getDocument({ data: bytes.slice(0), isEvalSupported: false }).promise;
+      views.clear();
+      state.objects = [];
+      state.activeId = null;
+      state.pendingNewText = null;
+      state.pages = [];
+      state.pdfBytes = bytes;
+      state.pdfName = file.name;
+      state.pdfPath = filePath;
+      state.savePath = null;
+      document.title = `${file.name} - ${BASE_TITLE}`;
+      els.pages.textContent = '';
+      els.empty.hidden = true;
+      els.fileName.textContent = `${file.name} · ${pdf.numPages}쪽`;
+
+      for (let i = 0; i < pdf.numPages; i++) {
+        const pdfPage = await pdf.getPage(i + 1);
+        state.pages.push(createPage(pdfPage, i));
+      }
+      fitPages();
+      for (const page of state.pages) await renderPage(page);
+      selectPage(0);
+      resetHistory();
+      setTool('select');
+      updateButtons();
+      toast('도구를 골라 PDF를 편집해 보세요');
+      loadNanum().catch(() => {});
+    } catch (e) {
+      console.error(e);
+      toast('PDF를 열 수 없어요. 손상되었거나 암호가 걸린 파일일 수 있어요.', { error: true });
+    }
+  }
+
+  function createPage(pdfPage, index) {
+    const viewport = pdfPage.getViewport({ scale: 1 });
+    const outer = document.createElement('div');
+    outer.className = 'page-outer';
+    const label = document.createElement('span');
+    label.className = 'page-label';
+    label.textContent = String(index + 1);
+    const inner = document.createElement('div');
+    inner.className = 'page-inner';
+    inner.style.width = viewport.width + 'px';
+    inner.style.height = viewport.height + 'px';
+    const canvas = document.createElement('canvas');
+    const layer = document.createElement('div');
+    layer.className = 'layer';
+    inner.append(canvas, layer);
+    outer.append(inner, label);
+    els.pages.appendChild(outer);
+
+    const page = { index, pdfPage, viewport, width: viewport.width, height: viewport.height, scale: 1, outer, inner, layer, canvas };
+    outer.addEventListener('pointerdown', (e) => onPagePointerDown(page, e));
+    // pointerdown 뒤에 오는 mousedown의 기본 동작이 방금 만든 텍스트 상자의 포커스를 빼앗지 않게 막는다.
+    // (편집 중인 텍스트 안을 누를 때는 커서 이동을 위해 그대로 둔다)
+    outer.addEventListener('mousedown', (e) => {
+      if (!(e.target.closest && e.target.closest('.editable'))) e.preventDefault();
+    });
+    return page;
+  }
+
+  async function renderPage(page) {
+    const ratio = Math.min(2, Math.max(1, window.devicePixelRatio || 1));
+    const vp = page.pdfPage.getViewport({ scale: ratio });
+    page.canvas.width = Math.floor(vp.width);
+    page.canvas.height = Math.floor(vp.height);
+    await page.pdfPage.render({ canvasContext: page.canvas.getContext('2d'), viewport: vp }).promise;
+  }
+
+  // 화면 폭에 맞춰 페이지를 축소한다. 객체 좌표는 항상 PDF 단위(pt)로 유지되고,
+  // 포인터 이동량만 page.scale로 나눠 환산한다. (참고: PDFPage.svelte measure / pageScale)
+  function fitPages() {
+    const available = els.pages.clientWidth || window.innerWidth - 32;
+    state.pages.forEach((page) => {
+      page.scale = Math.min(1.5, available / page.width);
+      page.outer.style.width = page.width * page.scale + 'px';
+      page.outer.style.height = page.height * page.scale + 'px';
+      page.inner.style.transform = `scale(${page.scale})`;
+    });
+  }
+  window.addEventListener('resize', fitPages);
+
+  function selectPage(index) {
+    state.selectedPage = index;
+    state.pages.forEach((p, i) => p.outer.classList.toggle('selected', i === index));
+  }
+
+  // 화면 좌표 → 페이지 좌표(pt)
+  function pagePoint(page, e) {
+    const rect = page.outer.getBoundingClientRect();
+    return {
+      x: Math.min(page.width, Math.max(0, (e.clientX - rect.left) / page.scale)),
+      y: Math.min(page.height, Math.max(0, (e.clientY - rect.top) / page.scale)),
+    };
+  }
+
+  function onPagePointerDown(page, e) {
+    if (e.button !== 0) return;
+    selectPage(page.index);
+    if (DRAW_TOOLS.includes(state.tool)) {
+      e.preventDefault();
+      startDrawing(page, e);
+    } else if (state.tool === 'text') {
+      e.preventDefault();
+      finishTextEditing();
+      const p = pagePoint(page, e);
+      const st = state.style.text;
+      setTool('select'); // 도구 전환이 편집을 끝내므로 텍스트를 만들기 전에 바꾼다.
+      addText(page, p.x, p.y - (st.size * st.lineHeight) / 2);
+    } else if (e.target === page.layer || e.target === page.canvas) {
+      finishTextEditing();
+      setActive(null);
+    }
+  }
+
+  // ---- 도구 전환 ----
+  function setTool(tool) {
+    finishTextEditing();
+    state.tool = tool;
+    toolButtons.forEach((b) => b.classList.toggle('active', b.dataset.tool === tool));
+    document.body.classList.toggle('mode-draw', DRAW_TOOLS.includes(tool));
+    document.body.classList.toggle('mode-text', tool === 'text');
+    if (tool !== 'select') setActive(null);
+    else updateProps();
+  }
+
+  // ---- 텍스트 객체 (참고: App.svelte addTextField, Text.svelte) ----
+  function addText(page, x, y) {
+    const st = state.style.text;
+    const obj = {
+      id: nextId++,
+      type: 'text',
+      page: page.index,
+      lines: ['텍스트를 입력하세요'],
+      size: st.size,
+      lineHeight: st.lineHeight,
+      fontFamily: st.fontFamily,
+      color: st.color,
+      x: Math.max(0, Math.min(page.width - 40, x)),
+      y: Math.max(0, Math.min(page.height - st.size * st.lineHeight, y)),
+    };
+    if (obj.fontFamily === 'NanumGothic') {
+      loadNanum().catch(() => toast('한글 폰트를 불러오지 못했어요. 저장할 때 다시 시도할게요.', { error: true }));
+    }
+    state.objects.push(obj);
+    // 새 텍스트는 편집을 마칠 때 한 번에 기록한다(빈 텍스트면 기록 없이 사라짐).
+    state.pendingNewText = obj.id;
+    mount(obj);
+    setActive(obj.id);
+    startEditing(obj.id, true);
+  }
+
+  function startEditing(id, selectAll = false) {
+    const obj = getObject(id);
+    const view = views.get(id);
+    if (!obj || !view || view.editing) return;
+    view.editing = true;
+    view.el.classList.add('editing');
+    const ed = view.editable;
+    try {
+      ed.contentEditable = 'plaintext-only';
+    } catch (e) {
+      ed.contentEditable = 'true';
+    }
+    if (ed.contentEditable !== 'plaintext-only') ed.contentEditable = 'true';
+    ed.focus();
+    const range = document.createRange();
+    range.selectNodeContents(ed);
+    if (!selectAll) range.collapse(false);
+    const sel = window.getSelection();
+    sel.removeAllRanges();
+    sel.addRange(range);
+  }
+
+  function stopEditing(id) {
+    const obj = getObject(id);
+    const view = views.get(id);
+    if (!obj || !view || !view.editing) return;
+    view.editing = false;
+    view.el.classList.remove('editing');
+    view.editable.contentEditable = 'false';
+    const lines = view.editable.innerText.replace(/\r/g, '').replace(/ /g, ' ').split('\n');
+    while (lines.length > 1 && lines[lines.length - 1] === '') lines.pop();
+    const isNew = state.pendingNewText === id;
+    if (lines.every((l) => l.trim() === '')) {
+      removeObject(id);
+      if (isNew) state.pendingNewText = null;
+      else commit();
+      return;
+    }
+    const changed = lines.join('\n') !== obj.lines.join('\n');
+    obj.lines = lines;
+    view.editable.textContent = lines.join('\n');
+    if (isNew || changed) commit();
+  }
+
+  function finishTextEditing() {
+    const a = document.activeElement;
+    if (a && a.classList && a.classList.contains('editable')) a.blur();
+  }
+
+  // ---- 이미지 객체 (참고: App.svelte addImage, Image.svelte) ----
+  async function addImage(file) {
+    const page = state.pages[state.selectedPage];
+    if (!file || !page) return;
+    try {
+      // dataURL로 읽어야 canvas가 오염(tainted)되지 않는다.
+      const img = await readAsImage(await readAsDataURL(file));
+      let bytes;
+      let mime = file.type;
+      if (mime === 'image/jpeg' || mime === 'image/png') {
+        bytes = await readAsArrayBuffer(file);
+      } else {
+        // pdf-lib은 JPEG/PNG만 임베드할 수 있으므로 그 외 형식은 PNG로 변환한다.
+        const c = document.createElement('canvas');
+        c.width = img.naturalWidth;
+        c.height = img.naturalHeight;
+        c.getContext('2d').drawImage(img, 0, 0);
+        const blob = await new Promise((r) => c.toBlob(r, 'image/png'));
+        bytes = await readAsArrayBuffer(blob);
+        mime = 'image/png';
+      }
+      let width = img.naturalWidth;
+      let height = img.naturalHeight;
+      const limit = Math.min(500, page.width * 0.6, page.height * 0.6);
+      const scale = Math.min(1, limit / width, limit / height);
+      width *= scale;
+      height *= scale;
+      const pos = visiblePosition(page, width, height);
+      const obj = { id: nextId++, type: 'image', page: page.index, x: pos.x, y: pos.y, width, height, img, bytes, mime };
+      setTool('select');
+      state.objects.push(obj);
+      mount(obj);
+      setActive(obj.id);
+      commit();
+    } catch (e) {
+      console.error(e);
+      toast('이미지를 추가할 수 없어요. 지원하지 않는 형식일 수 있어요.', { error: true });
+    }
+  }
+
+  // 선택된 페이지 중 화면에 보이는 영역의 위쪽 가운데 위치
+  function visiblePosition(page, w, h) {
+    const rect = page.outer.getBoundingClientRect();
+    const headerBottom = document.querySelector('header').getBoundingClientRect().bottom;
+    const visibleTop = Math.max(0, (headerBottom + 24 - rect.top) / page.scale);
+    return {
+      x: Math.max(0, (page.width - w) / 2),
+      y: Math.max(0, Math.min(page.height - h, visibleTop + 24)),
+    };
+  }
+
+  // ---- 하이라이트 · 도형 · 펜 그리기 (펜 참고: DrawingCanvas.svelte) ----
+  function startDrawing(page, e) {
+    finishTextEditing();
+    setActive(null);
+    const tool = state.tool;
+    const st = state.style[tool];
+    const p0 = pagePoint(page, e);
+    const obj = { id: nextId++, type: tool, page: page.index, x: p0.x, y: p0.y, width: 0, height: 0, ...st };
+    let points = tool === 'pen' ? [[p0.x, p0.y]] : null;
+    if (points) Object.assign(obj, penGeometry(points, st.strokeWidth));
+    mount(obj);
+
+    const outer = page.outer;
+    outer.setPointerCapture(e.pointerId);
+    const onMove = (ev) => {
+      const p = pagePoint(page, ev);
+      if (points) {
+        const last = points[points.length - 1];
+        if (Math.hypot(p.x - last[0], p.y - last[1]) < 1) return;
+        points.push([p.x, p.y]);
+        Object.assign(obj, penGeometry(points, obj.strokeWidth));
+      } else {
+        let w = p.x - p0.x;
+        let h = p.y - p0.y;
+        if (ev.shiftKey && tool !== 'highlight') {
+          const s = Math.max(Math.abs(w), Math.abs(h));
+          w = Math.sign(w || 1) * s;
+          h = Math.sign(h || 1) * s;
+        }
+        obj.x = Math.min(p0.x, p0.x + w);
+        obj.y = Math.min(p0.y, p0.y + h);
+        obj.width = Math.abs(w);
+        obj.height = Math.abs(h);
+      }
+      update(obj);
+    };
+    const onUp = () => {
+      outer.removeEventListener('pointermove', onMove);
+      outer.removeEventListener('pointerup', onUp);
+      outer.removeEventListener('pointercancel', onUp);
+      const tooSmall = points ? false : obj.width < 3 && obj.height < 3;
+      if (tooSmall) {
+        views.get(obj.id).el.remove();
+        views.delete(obj.id);
+        return;
+      }
+      state.objects.push(obj);
+      commit();
+    };
+    outer.addEventListener('pointermove', onMove);
+    outer.addEventListener('pointerup', onUp);
+    outer.addEventListener('pointercancel', onUp);
+  }
+
+  // 펜 좌표(페이지 기준)를 경계 상자 + 상자 기준 상대 좌표로 바꾼다.
+  // 선 두께의 절반만큼 여백을 두어 선이 상자 안에 들어오게 한다.
+  function penGeometry(points, strokeWidth) {
+    const pad = strokeWidth / 2;
+    const xs = points.map((p) => p[0]);
+    const ys = points.map((p) => p[1]);
+    const minX = Math.min(...xs) - pad;
+    const minY = Math.min(...ys) - pad;
+    const width = Math.max(...xs) + pad - minX;
+    const height = Math.max(...ys) + pad - minY;
+    return {
+      x: minX,
+      y: minY,
+      width,
+      height,
+      ow: width,
+      oh: height,
+      points: points.map((p) => [p[0] - minX, p[1] - minY]),
+    };
+  }
+
+  // 점 사이를 2차 베지어로 이어 부드러운 SVG path를 만든다.
+  function penPath(points, sx, sy) {
+    const f = (n) => Math.round(n * 100) / 100;
+    const P = points.map((p) => [f(p[0] * sx), f(p[1] * sy)]);
+    if (P.length === 1) return `M${P[0][0]} ${P[0][1]} L${P[0][0]} ${P[0][1]}`;
+    let d = `M${P[0][0]} ${P[0][1]}`;
+    for (let i = 1; i < P.length - 1; i++) {
+      const mx = f((P[i][0] + P[i + 1][0]) / 2);
+      const my = f((P[i][1] + P[i + 1][1]) / 2);
+      d += ` Q${P[i][0]} ${P[i][1]} ${mx} ${my}`;
+    }
+    const last = P[P.length - 1];
+    return d + ` L${last[0]} ${last[1]}`;
+  }
+
+  function shapeSVG(obj, w, h) {
+    const c = obj.color;
+    const sw = obj.strokeWidth || 0;
+    let body = '';
+    if (obj.type === 'highlight') {
+      body = `<rect width="${w}" height="${h}" fill="${c}" fill-opacity="${HIGHLIGHT_OPACITY}"/>`;
+    } else if (obj.type === 'rect') {
+      const fill = obj.fill ? `fill="${c}" fill-opacity="${FILL_OPACITY}"` : 'fill="none"';
+      body = `<rect x="${sw / 2}" y="${sw / 2}" width="${Math.max(0, w - sw)}" height="${Math.max(0, h - sw)}" ${fill} stroke="${c}" stroke-width="${sw}"/>`;
+    } else if (obj.type === 'ellipse') {
+      const fill = obj.fill ? `fill="${c}" fill-opacity="${FILL_OPACITY}"` : 'fill="none"';
+      body = `<ellipse cx="${w / 2}" cy="${h / 2}" rx="${Math.max(0, (w - sw) / 2)}" ry="${Math.max(0, (h - sw) / 2)}" ${fill} stroke="${c}" stroke-width="${sw}"/>`;
+    } else if (obj.type === 'pen') {
+      const d = penPath(obj.points, w / obj.ow, h / obj.oh);
+      body = `<path d="${d}" fill="none" stroke="${c}" stroke-width="${sw}" stroke-linecap="round" stroke-linejoin="round"/>`;
+    }
+    return `<svg class="shape" width="${w}" height="${h}">${body}</svg>`;
+  }
+
+  // ---- 화면 요소 생성 · 갱신 ----
+  function mount(obj) {
+    const page = state.pages[obj.page];
+    const el = document.createElement('div');
+    el.className = 'obj ' + obj.type;
+    const view = { el, editable: null, editing: false };
+    views.set(obj.id, view);
+
+    if (obj.type === 'text') {
+      const editable = document.createElement('div');
+      editable.className = 'editable';
+      editable.spellcheck = false;
+      editable.textContent = obj.lines.join('\n');
+      el.appendChild(editable);
+      view.editable = editable;
+      const id = obj.id;
+      editable.addEventListener('blur', () => stopEditing(id));
+      editable.addEventListener('keydown', (e) => {
+        if (e.key === 'Escape') editable.blur();
+      });
+      // 붙여넣기는 서식 없이 텍스트만 (참고: Text.svelte onPaste)
+      editable.addEventListener('paste', (e) => {
+        e.preventDefault();
+        document.execCommand('insertText', false, e.clipboardData.getData('text'));
+      });
+    } else if (obj.type === 'image') {
+      // img 태그 대신 canvas를 써서 브라우저의 자동 크기 조정을 피한다. (참고: Image.svelte render)
+      const canvas = document.createElement('canvas');
+      canvas.width = obj.img.naturalWidth;
+      canvas.height = obj.img.naturalHeight;
+      canvas.getContext('2d').drawImage(obj.img, 0, 0);
+      el.appendChild(canvas);
+    }
+    if (RESIZABLE.includes(obj.type)) {
+      ['left-top', 'top', 'right-top', 'right', 'right-bottom', 'bottom', 'left-bottom', 'left'].forEach((dir) => {
+        const h = document.createElement('div');
+        h.className = 'handle';
+        h.dataset.dir = dir;
+        el.appendChild(h);
+      });
+    }
+    page.layer.appendChild(el);
+    update(obj);
+    makeInteractive(obj.id);
+  }
+
+  function update(obj, d = { dx: 0, dy: 0, dw: 0, dh: 0 }) {
+    const view = views.get(obj.id);
+    if (!view) return;
+    const el = view.el;
+    el.style.transform = `translate(${obj.x + d.dx}px, ${obj.y + d.dy}px)`;
+    if (obj.type === 'text') {
+      const s = view.editable.style;
+      s.fontFamily = FONTS[obj.fontFamily].css;
+      s.fontSize = obj.size + 'px';
+      s.lineHeight = String(obj.lineHeight);
+      s.color = obj.color;
+      return;
+    }
+    const w = Math.max(1, obj.width + d.dw);
+    const h = Math.max(1, obj.height + d.dh);
+    el.style.width = w + 'px';
+    el.style.height = h + 'px';
+    if (obj.type !== 'image') {
+      const old = el.querySelector('svg.shape');
+      const tmp = document.createElement('div');
+      tmp.innerHTML = shapeSVG(obj, w, h);
+      if (old) old.replaceWith(tmp.firstChild);
+      else el.insertBefore(tmp.firstChild, el.firstChild);
+    }
+  }
+
+  function renderAll() {
+    views.forEach((v) => v.el.remove());
+    views.clear();
+    state.objects.forEach(mount);
+  }
+
+  // ---- 이동 · 리사이즈 (참고: utils/pannable.js, Image.svelte) ----
+  let shiftDown = false;
+  window.addEventListener('keydown', (e) => { if (e.key === 'Shift') shiftDown = true; });
+  window.addEventListener('keyup', (e) => { if (e.key === 'Shift') shiftDown = false; });
+  window.addEventListener('blur', () => { shiftDown = false; });
+
+  // Shift 비율 유지 계산 (Image.svelte calculateDimensionWithRatio 를 옮김)
+  function withRatio(obj, ratio, dw, dh) {
+    const dhFromDw = (obj.width + dw) / ratio - obj.height;
+    if (dh > dhFromDw) {
+      const dwFromDh = (obj.height + dh) * ratio - obj.width;
+      return [dwFromDh, dh];
+    }
+    return [dw, dhFromDw];
+  }
+
+  function resizeDelta(obj, dir, mx, my, ratio) {
+    let dx = 0, dy = 0, dw = 0, dh = 0;
+    const left = dir.includes('left');
+    const right = dir.includes('right');
+    const top = dir.includes('top');
+    const bottom = dir.includes('bottom');
+    if (left) dw = -mx;
+    if (right) dw = mx;
+    if (top) dh = -my;
+    if (bottom) dh = my;
+    if (ratio !== null) {
+      [dw, dh] = withRatio(obj, ratio, left || right ? dw : -Infinity, top || bottom ? dh : -Infinity);
+    }
+    const min = 6;
+    if (obj.width + dw < min) {
+      dw = min - obj.width;
+      if (ratio !== null) dh = (obj.width + dw) / ratio - obj.height;
+    }
+    if (obj.height + dh < min) {
+      dh = min - obj.height;
+      if (ratio !== null) dw = (obj.height + dh) * ratio - obj.width;
+    }
+    if (left) dx = -dw;
+    if (top) dy = -dh;
+    return { dx, dy, dw, dh };
+  }
+
+  // 실행취소로 객체가 새로 만들어질 수 있으므로 핸들러 안에서는 항상 id로 다시 찾는다.
+  function makeInteractive(id) {
+    const el = views.get(id).el;
+    el.addEventListener('pointerdown', (e) => {
+      const obj = getObject(id);
+      const view = views.get(id);
+      if (!obj || e.button !== 0 || state.tool !== 'select') return;
+      if (view.editing && view.editable.contains(e.target)) return;
+      e.preventDefault();
+      e.stopPropagation();
+      selectPage(obj.page);
+      // 다른 텍스트를 편집 중이었다면 먼저 확정한다.
+      if (document.activeElement !== view.editable) finishTextEditing();
+      if (!getObject(id)) return;
+      setActive(id);
+
+      const page = state.pages[obj.page];
+      const startX = e.clientX;
+      const startY = e.clientY;
+      const dir = e.target.classList.contains('handle') ? e.target.dataset.dir : null;
+      const ratio0 = obj.width / obj.height;
+      let delta = { dx: 0, dy: 0, dw: 0, dh: 0 };
+      let moved = false;
+      el.setPointerCapture(e.pointerId);
+      el.classList.add('dragging');
+
+      const onMove = (ev) => {
+        if (!moved && Math.hypot(ev.clientX - startX, ev.clientY - startY) < 3) return;
+        moved = true;
+        const mx = (ev.clientX - startX) / page.scale;
+        const my = (ev.clientY - startY) / page.scale;
+        delta = dir
+          ? resizeDelta(obj, dir, mx, my, shiftDown || ev.shiftKey ? ratio0 : null)
+          : { dx: mx, dy: my, dw: 0, dh: 0 };
+        update(obj, delta);
+      };
+      const onUp = () => {
+        el.removeEventListener('pointermove', onMove);
+        el.removeEventListener('pointerup', onUp);
+        el.removeEventListener('pointercancel', onUp);
+        el.classList.remove('dragging');
+        if (moved) {
+          obj.x += delta.dx;
+          obj.y += delta.dy;
+          if (obj.type !== 'text') {
+            obj.width += delta.dw;
+            obj.height += delta.dh;
+          }
+          update(obj);
+          commit();
+        } else if (obj.type === 'text') {
+          startEditing(id);
+        }
+      };
+      el.addEventListener('pointermove', onMove);
+      el.addEventListener('pointerup', onUp);
+      el.addEventListener('pointercancel', onUp);
+    });
+  }
+
+  function getObject(id) {
+    return state.objects.find((o) => o.id === id) || null;
+  }
+
+  function setActive(id) {
+    state.activeId = id;
+    views.forEach((v, vid) => v.el.classList.toggle('active', vid === id));
+    updateProps();
+  }
+
+  function removeObject(id) {
+    const view = views.get(id);
+    if (view) view.el.remove();
+    views.delete(id);
+    state.objects = state.objects.filter((o) => o.id !== id);
+    if (state.activeId === id) setActive(null);
+  }
+
+  function deleteActive() {
+    const id = state.activeId;
+    if (!getObject(id)) return;
+    const wasNew = state.pendingNewText === id;
+    const view = views.get(id);
+    if (view && view.editing) {
+      view.editing = false; // blur 시 다시 처리되지 않게
+    }
+    removeObject(id);
+    if (wasNew) state.pendingNewText = null;
+    else commit();
+  }
+
+  // ---- 속성 패널 ----
+  // 선택된 객체가 있으면 그 객체의 속성을, 없으면 현재 그리기 도구의 기본값을 보여준다.
+  function propsTarget() {
+    const obj = getObject(state.activeId);
+    if (obj) return { type: obj.type, values: obj, obj };
+    if (state.style[state.tool]) return { type: state.tool, values: state.style[state.tool], obj: null };
+    return null;
+  }
+
+  PALETTE.forEach((color) => {
+    const b = document.createElement('button');
+    b.className = 'swatch';
+    b.style.background = color;
+    b.dataset.color = color;
+    b.title = color;
+    b.addEventListener('click', () => setProp('color', color, true));
+    els.swatches.appendChild(b);
+  });
+  const custom = document.createElement('label');
+  custom.className = 'custom-color';
+  custom.title = '다른 색상';
+  const customInput = document.createElement('input');
+  customInput.type = 'color';
+  customInput.addEventListener('input', () => setProp('color', customInput.value.toUpperCase(), false));
+  customInput.addEventListener('change', () => setProp('color', customInput.value.toUpperCase(), true));
+  custom.appendChild(customInput);
+  els.swatches.appendChild(custom);
+
+  function updateProps() {
+    const t = propsTarget();
+    if (!t) {
+      els.propsWrap.hidden = true;
+      return;
+    }
+    els.propsWrap.hidden = false;
+    const fields = PROPS[t.type] || [];
+    document.querySelectorAll('.props [data-prop]').forEach((f) => {
+      f.hidden = !fields.includes(f.dataset.prop);
+    });
+    const v = t.values;
+    if (v.color) {
+      const upper = v.color.toUpperCase();
+      let matched = false;
+      els.swatches.querySelectorAll('.swatch').forEach((s) => {
+        const on = s.dataset.color === upper;
+        matched = matched || on;
+        s.classList.toggle('selected', on);
+      });
+      custom.classList.toggle('selected', !matched);
+      customInput.value = upper.toLowerCase();
+    }
+    if (v.strokeWidth !== undefined) els.strokeInput.value = v.strokeWidth;
+    els.fillSwitch.setAttribute('aria-checked', String(!!v.fill));
+    if (v.fontFamily) els.fontSelect.value = v.fontFamily;
+    if (v.size) els.sizeInput.value = v.size;
+    if (v.lineHeight) els.lineHeightInput.value = v.lineHeight;
+    els.deleteBtn.hidden = !t.obj;
+    els.propsHint.textContent = t.obj ? (t.type === 'image' ? HINTS.image : '') : HINTS[state.tool] || '';
+  }
+
+  // final=true일 때만 실행취소 기록을 남긴다(입력 중에는 미리보기만).
+  function setProp(key, value, final) {
+    const t = propsTarget();
+    if (!t) return;
+    if (state.style[t.type]) state.style[t.type][key] = value;
+    if (t.obj) {
+      t.obj[key] = value;
+      update(t.obj);
+      if (final) commit();
+    }
+    if (key === 'fontFamily' && value === 'NanumGothic') {
+      loadNanum()
+        .then(() => state.objects.forEach((o) => o.type === 'text' && update(o)))
+        .catch(() => toast('한글 폰트를 불러오지 못했어요.', { error: true }));
+    }
+    updateProps();
+  }
+
+  function bindNumber(input, key, min, max) {
+    const read = () => {
+      const v = parseFloat(input.value);
+      return v >= min && v <= max ? v : null;
+    };
+    input.addEventListener('input', () => {
+      const v = read();
+      if (v !== null) setProp(key, v, false);
+    });
+    input.addEventListener('change', () => {
+      const v = read();
+      if (v !== null) setProp(key, v, true);
+      else updateProps();
+    });
+  }
+  bindNumber(els.strokeInput, 'strokeWidth', 1, 40);
+  bindNumber(els.sizeInput, 'size', 4, 200);
+  bindNumber(els.lineHeightInput, 'lineHeight', 1, 5);
+  els.fontSelect.addEventListener('change', () => setProp('fontFamily', els.fontSelect.value, true));
+  els.fillSwitch.addEventListener('click', () => {
+    const t = propsTarget();
+    if (t) setProp('fill', !t.values.fill, true);
+  });
+  els.deleteBtn.addEventListener('click', deleteActive);
+
+  // 패널 버튼을 눌러도 텍스트 편집 포커스가 풀리지 않게 한다.
+  els.propsWrap.addEventListener('mousedown', (e) => {
+    if (!['SELECT', 'INPUT'].includes(e.target.tagName)) e.preventDefault();
+  });
+
+  function updateButtons() {
+    const hasPdf = state.pages.length > 0;
+    toolButtons.forEach((b) => { b.disabled = !hasPdf; });
+    els.imageTool.disabled = !hasPdf;
+    els.saveBtn.disabled = !hasPdf || state.saving;
+    if (!hasPdf) {
+      els.undoBtn.disabled = true;
+      els.redoBtn.disabled = true;
+    }
+  }
+
+  // ---- 저장 (참고: utils/PDF.js save) ----
+  function hexToRgb(hex) {
+    const n = parseInt(hex.slice(1), 16);
+    return PDFLib.rgb(((n >> 16) & 255) / 255, ((n >> 8) & 255) / 255, (n & 255) / 255);
+  }
+
+  // 화면에서 줄 상자 맨 위부터 글자 기준선(baseline)까지의 거리.
+  // CSS는 글꼴의 ascent+descent 영역을 줄 높이 가운데에 놓으므로 같은 방식으로 계산한다.
+  const measureCtx = document.createElement('canvas').getContext('2d');
+  function baselineOffset(obj) {
+    measureCtx.font = `${obj.size}px ${FONTS[obj.fontFamily].css}`;
+    const m = measureCtx.measureText('Hg가');
+    let ascent = m.fontBoundingBoxAscent;
+    let descent = m.fontBoundingBoxDescent;
+    if (!(ascent > 0)) {
+      ascent = obj.size * 0.8;
+      descent = obj.size * 0.2;
+    }
+    return (obj.size * obj.lineHeight - (ascent + descent)) / 2 + ascent;
+  }
+
+  function canEncode(font, lines) {
+    try {
+      lines.forEach((l) => font.encodeText(l));
+      return true;
+    } catch (e) {
+      return false;
+    }
+  }
+
+  async function savePDF(forceDialog = false) {
+    if (!state.pdfBytes || state.saving) return;
+    finishTextEditing();
+    state.saving = true;
+    updateButtons();
+    toast('PDF를 만들고 있어요', { sticky: true });
+    try {
+      const {
+        PDFDocument, StandardFonts, degrees, BlendMode, LineCapStyle, LineJoinStyle,
+        pushGraphicsState, popGraphicsState, setLineJoin,
+      } = PDFLib;
+      const doc = await PDFDocument.load(state.pdfBytes, { ignoreEncryption: true });
+      doc.registerFontkit(fontkit);
+      const pdfPages = doc.getPages();
+      const fontCache = {};
+      let nanumFallback = false;
+
+      async function getFont(name) {
+        if (!fontCache[name]) {
+          const def = FONTS[name];
+          fontCache[name] = def.standard
+            ? doc.embedFont(StandardFonts[def.standard])
+            : loadNanum().then((buf) => doc.embedFont(buf, { subset: true }));
+        }
+        return fontCache[name];
+      }
+
+      for (const obj of state.objects) {
+        const page = state.pages[obj.page];
+        const pdfPage = pdfPages[obj.page];
+        const vp = page.viewport;
+        // 화면 좌표(y는 위에서부터)를 PDF 사용자 좌표(y는 아래에서부터)로 바꾼다.
+        // convertToPdfPoint는 CropBox 원점과 페이지 회전(/Rotate)까지 반영한다.
+        const toPdf = (x, y) => vp.convertToPdfPoint(x, y);
+        const rotation = ((vp.rotation % 360) + 360) % 360;
+        const rotate = degrees(rotation);
+        const color = obj.color ? hexToRgb(obj.color) : undefined;
+        const sw = obj.strokeWidth || 0;
+
+        if (obj.type === 'image') {
+          const image = obj.mime === 'image/jpeg' ? await doc.embedJpg(obj.bytes) : await doc.embedPng(obj.bytes);
+          const [x, y] = toPdf(obj.x, obj.y + obj.height); // 화면상 왼쪽 아래 모서리
+          pdfPage.drawImage(image, { x, y, width: obj.width, height: obj.height, rotate });
+        } else if (obj.type === 'text') {
+          let font = await getFont(obj.fontFamily);
+          if (!canEncode(font, obj.lines)) {
+            // 표준 폰트로 표현할 수 없는 글자(한글 등)가 있으면 나눔고딕으로 대체한다.
+            font = await getFont('NanumGothic');
+            nanumFallback = true;
+          }
+          const offset = baselineOffset(obj);
+          obj.lines.forEach((line, i) => {
+            if (!line) return;
+            const [x, y] = toPdf(obj.x, obj.y + i * obj.size * obj.lineHeight + offset);
+            pdfPage.drawText(line, { x, y, size: obj.size, font, color, rotate });
+          });
+        } else if (obj.type === 'highlight') {
+          const [x, y] = toPdf(obj.x, obj.y + obj.height);
+          pdfPage.drawRectangle({
+            x, y, width: obj.width, height: obj.height, rotate,
+            color, opacity: HIGHLIGHT_OPACITY, blendMode: BlendMode.Multiply,
+          });
+        } else if (obj.type === 'rect') {
+          // pdf-lib의 테두리는 사각형 경계선 가운데에 그려지므로 두께의 절반만큼 안쪽으로 줄인다.
+          const [x, y] = toPdf(obj.x + sw / 2, obj.y + obj.height - sw / 2);
+          const opts = {
+            x, y, width: Math.max(0, obj.width - sw), height: Math.max(0, obj.height - sw), rotate,
+            borderColor: color, borderWidth: sw,
+          };
+          if (obj.fill) Object.assign(opts, { color, opacity: FILL_OPACITY, borderOpacity: 1 });
+          pdfPage.drawRectangle(opts);
+        } else if (obj.type === 'ellipse') {
+          const [x, y] = toPdf(obj.x + obj.width / 2, obj.y + obj.height / 2);
+          let rx = Math.max(0, (obj.width - sw) / 2);
+          let ry = Math.max(0, (obj.height - sw) / 2);
+          // 90°/270° 회전 페이지에서는 화면의 가로가 PDF의 세로가 된다.
+          if (rotation % 180 !== 0) [rx, ry] = [ry, rx];
+          const opts = { x, y, xScale: rx, yScale: ry, borderColor: color, borderWidth: sw };
+          if (obj.fill) Object.assign(opts, { color, opacity: FILL_OPACITY, borderOpacity: 1 });
+          pdfPage.drawEllipse(opts);
+        } else if (obj.type === 'pen') {
+          const [x, y] = toPdf(obj.x, obj.y); // SVG path 원점 = 상자 왼쪽 위
+          const path = penPath(obj.points, obj.width / obj.ow, obj.height / obj.oh);
+          pdfPage.pushOperators(pushGraphicsState(), setLineJoin(LineJoinStyle.Round));
+          pdfPage.drawSvgPath(path, {
+            x, y, rotate, borderColor: color, borderWidth: sw, borderLineCap: LineCapStyle.Round,
+          });
+          pdfPage.pushOperators(popGraphicsState());
+        }
+      }
+
+      const out = await doc.save();
+      const fallbackNote = nanumFallback ? ' 일부 글자는 나눔고딕으로 바꿔 저장했어요.' : '';
+      const suggestedName = state.pdfName.replace(/\.pdf$/i, '') + '-edited.pdf';
+      if (desktop) {
+        // 데스크톱: 네이티브 저장 대화상자로 파일에 직접 쓴다.
+        const res = await desktop.savePdf({
+          data: out, suggestedName, sourcePath: state.pdfPath, targetPath: state.savePath, forceDialog,
+        });
+        if (res.canceled) {
+          toast('저장을 취소했어요');
+          return;
+        }
+        state.savePath = res.path;
+        markSaved();
+        toast(`${res.name}에 저장했어요.${fallbackNote}`);
+        return;
+      }
+      const blob = new Blob([out], { type: 'application/pdf' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = suggestedName;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 10000);
+      markSaved();
+      toast(`PDF를 저장했어요.${fallbackNote}`);
+    } catch (e) {
+      console.error(e);
+      toast('저장하지 못했어요: ' + (e && e.message ? e.message : e), { error: true });
+    } finally {
+      state.saving = false;
+      updateButtons();
+    }
+  }
+
+  // ---- 이벤트 연결 ----
+  const fromDesktopFile = (f) => new File([f.data], f.name, { type: 'application/pdf' });
+  const pathOf = (file) => (desktop ? desktop.getPathForFile(file) : null);
+  async function openPicker() {
+    if (!desktop) {
+      els.pdfInput.click();
+      return;
+    }
+    try {
+      const f = await desktop.openDialog(); // 저장 안 된 변경 확인은 메인 프로세스가 한다.
+      if (f) openPDF(fromDesktopFile(f), f.path, { confirmed: true });
+    } catch (e) {
+      console.error(e);
+      toast('파일을 열 수 없어요.', { error: true });
+    }
+  }
+  els.openBtn.addEventListener('click', openPicker);
+  els.emptyOpenBtn.addEventListener('click', openPicker);
+  els.pdfInput.addEventListener('change', (e) => {
+    const file = e.target.files[0];
+    openPDF(file, file ? pathOf(file) : null);
+    e.target.value = '';
+  });
+  els.imageInput.addEventListener('change', (e) => {
+    addImage(e.target.files[0]);
+    e.target.value = '';
+  });
+  els.imageTool.addEventListener('click', () => els.imageInput.click());
+  toolButtons.forEach((b) => b.addEventListener('click', () => setTool(b.dataset.tool)));
+  els.undoBtn.addEventListener('click', undo);
+  els.redoBtn.addEventListener('click', redo);
+  els.saveBtn.addEventListener('click', () => savePDF());
+
+  const SHORTCUTS = { v: 'select', t: 'text', h: 'highlight', r: 'rect', o: 'ellipse', p: 'pen' };
+  window.addEventListener('keydown', (e) => {
+    if (!state.pages.length) return;
+    const a = document.activeElement;
+    const typing = a && (['INPUT', 'SELECT', 'TEXTAREA'].includes(a.tagName) || a.isContentEditable);
+    const mod = e.ctrlKey || e.metaKey;
+    // 데스크톱 앱에서는 이 단축키를 메뉴가 받아 onCommand로 전달한다(중복 실행 방지).
+    if (desktop && mod && ['z', 'y', 's', 'o'].includes(e.key.toLowerCase())) return;
+    if (typing) return; // 텍스트 편집 중에는 브라우저 기본 동작(글자 단위 실행취소 등)을 따른다.
+    if (mod && e.key.toLowerCase() === 'z') {
+      e.preventDefault();
+      if (e.shiftKey) redo();
+      else undo();
+    } else if (mod && e.key.toLowerCase() === 'y') {
+      e.preventDefault();
+      redo();
+    } else if (mod && e.key.toLowerCase() === 's') {
+      e.preventDefault();
+      savePDF();
+    } else if (mod && e.key.toLowerCase() === 'o') {
+      e.preventDefault();
+      openPicker();
+    } else if (!mod && !e.altKey && SHORTCUTS[e.key.toLowerCase()]) {
+      setTool(SHORTCUTS[e.key.toLowerCase()]);
+    } else if (!mod && e.key.toLowerCase() === 'i') {
+      els.imageInput.click();
+    } else if (e.key === 'Escape') {
+      if (state.activeId) setActive(null);
+      else setTool('select');
+    } else if ((e.key === 'Delete' || e.key === 'Backspace') && state.activeId) {
+      e.preventDefault();
+      deleteActive();
+    }
+  });
+
+  window.addEventListener('dragover', (e) => {
+    e.preventDefault();
+    els.empty.classList.add('over');
+  });
+  window.addEventListener('dragleave', () => els.empty.classList.remove('over'));
+  window.addEventListener('drop', (e) => {
+    e.preventDefault();
+    els.empty.classList.remove('over');
+    const file = e.dataTransfer.files[0];
+    if (!file) return;
+    if (file.type.startsWith('image/') && state.pages.length) addImage(file);
+    else openPDF(file, pathOf(file));
+  });
+
+  // ---- 데스크톱 앱 연동 (Electron 메뉴 · 파일 연결) ----
+  if (desktop) {
+    const typingNow = () => {
+      const a = document.activeElement;
+      return !!(a && a.isContentEditable);
+    };
+    desktop.onOpenFile((f) => openPDF(fromDesktopFile(f), f.path, { confirmed: true }));
+    desktop.onCommand((command) => {
+      if (command === 'open') openPicker();
+      else if (!state.pages.length) return;
+      else if (command === 'save') savePDF(false);
+      else if (command === 'saveAs') savePDF(true);
+      else if (command === 'undo') typingNow() ? document.execCommand('undo') : undo();
+      else if (command === 'redo') typingNow() ? document.execCommand('redo') : redo();
+    });
+  }
+
+  updateButtons();
+  if (desktop) desktop.ready();
+})();
+</script>
+</body>
+</html>
